@@ -123,16 +123,21 @@ struct alignas( OPTIX_SBT_RECORD_ALIGNMENT ) SbtRecord
 
 struct EmptyData {};
 
+struct HitData {
+  float3 kd;
+  float3 ke;
+};
+
 // Host/device params must match the device-side struct layout.
 struct Params
 {
   // output
   CUdeviceptr out_rgb;        // float3*
   CUdeviceptr out_bayer;      // float*
-  uint32_t    width;
-  uint32_t    height;
+  int         width;
+  int         height;
   int         spp;
-  uint32_t    frame;
+  int         frame;
   int         bayer_pattern;  // 0..3
 
   // camera
@@ -145,8 +150,7 @@ struct Params
   OptixTraversableHandle handle;
   CUdeviceptr d_vertices; // float3*
   CUdeviceptr d_indices;  // uint3*
-  CUdeviceptr d_kd;       // float3* diffuse
-  CUdeviceptr d_ke;       // float3* emission
+  CUdeviceptr d_normals;  // float3*
   uint32_t    num_triangles;
 
   // simple point light used in device
@@ -154,10 +158,9 @@ struct Params
   float3 light_emit;
 };
 
-// Hitgroup record payload is empty (we read geometry/materials from params).
 using RaygenRecord  = SbtRecord<EmptyData>;
 using MissRecord    = SbtRecord<EmptyData>;
-using HitgroupRecord= SbtRecord<EmptyData>;
+using HitgroupRecord= SbtRecord<HitData>;
 
 // ray type indices used by device code
 enum { RAY_RADIANCE = 0, RAY_SHADOW = 1, RAY_TYPE_COUNT = 2 };
@@ -181,20 +184,24 @@ struct State
   // SBT
   RaygenRecord         rg_rec {};
   std::array<MissRecord, RAY_TYPE_COUNT> ms_rec {};
-  std::array<HitgroupRecord, RAY_TYPE_COUNT> hg_rec {};
+  std::array<HitgroupRecord> hg_rec {};
   OptixShaderBindingTable sbt {};
+
+  CUdeviceptr d_sbt_rg = 0;
+  CUdeviceptr d_sbt_ms = 0;
+  CUdeviceptr d_sbt_hg = 0;
 
   // Geometry (host)
   std::vector<float3> vertices;
   std::vector<uint3>  indices;
-  std::vector<float3> kd;
-  std::vector<float3> ke;
+  std::vector<float3> normals;
 
   // Geometry (device)
   CUdeviceptr d_vertices = 0;
   CUdeviceptr d_indices  = 0;
   CUdeviceptr d_kd       = 0;
   CUdeviceptr d_ke       = 0;
+  CUdeviceptr d_normals  = 0;
 
   // GAS
   CUdeviceptr           d_gas   = 0;
@@ -221,8 +228,10 @@ struct State
 
     if (d_vertices)  cuMemFree(d_vertices);
     if (d_indices)   cuMemFree(d_indices);
-    if (d_kd)        cuMemFree(d_kd);
-    if (d_ke)        cuMemFree(d_ke);
+    if (d_sbt_rg)    cuMemFree(d_sbt_rg);
+    if (d_sbt_ms)    cuMemFree(d_sbt_ms);
+    if (d_sbt_hg)    cuMemFree(d_sbt_hg);
+    if (d_normals)   cuMemFree(d_normals);
     if (d_gas)       cuMemFree(d_gas);
 
     if (pipeline)    optixPipelineDestroy(pipeline);
@@ -253,7 +262,7 @@ static void addQuad(std::vector<float3>& V, std::vector<uint3>& I,
 
 static void buildCornell(State& s)
 {
-  s.vertices.clear(); s.indices.clear(); s.kd.clear(); s.ke.clear();
+  s.vertices.clear(); s.indices.clear(); s.normals.clear(); s.kd.clear(); s.ke.clear();
 
   const float3 red   = make_float3(0.63f, 0.065f, 0.05f);
   const float3 green = make_float3(0.14f, 0.45f, 0.091f);
@@ -332,11 +341,22 @@ static void buildCornell(State& s)
     addRect(p0,p3,q3,q0);
   }
 
-  // upload
+  // compute per-triangle normals
+  s.normals.resize(s.indices.size());
+  for (size_t i = 0; i < s.indices.size(); ++i) {
+    const uint3 tri = s.indices[i];
+    const float3& a = s.vertices[tri.x];
+    const float3& b = s.vertices[tri.y];
+    const float3& c = s.vertices[tri.z];
+    float3 ab = make_float3(b.x - a.x, b.y - a.y, b.z - a.z);
+    float3 ac = make_float3(c.x - a.x, c.y - a.y, c.z - a.z);
+    s.normals[i] = normalize3(cross3(ab, ac));
+  }
+
+  // upload geometry arrays (materials stored in SBT)
   upload(s.vertices, s.d_vertices);
   upload(s.indices,  s.d_indices);
-  upload(s.kd,       s.d_kd);
-  upload(s.ke,       s.d_ke);
+  upload(s.normals,  s.d_normals);
 }
 
 // ----- GAS -------------------------------------------------------------------
@@ -364,7 +384,7 @@ static void buildGAS(State& s)
 
   unsigned int triangle_input_flags = OPTIX_GEOMETRY_FLAG_NONE; // radiance CH only; we have a separate shadow AH PG
   tri.triangleArray.flags            = &triangle_input_flags;
-  tri.triangleArray.numSbtRecords    = 1; // single GAS, single SBT record (with stride for ray types)
+  tri.triangleArray.numSbtRecords    = s.h_params.num_triangles; // one SBT record per triangle
 
   OptixAccelBuildOptions accel_opts {};
   accel_opts.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
@@ -498,24 +518,39 @@ static void createPipeline(State& s)
   OTK_CHECK( optixSbtRecordPackHeader(s.pg_raygen, &s.rg_rec) );
   OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_rad, &s.ms_rec[RAY_RADIANCE]) );
   OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_sh,  &s.ms_rec[RAY_SHADOW]) );
-  OTK_CHECK( optixSbtRecordPackHeader(s.pg_hit_rad,  &s.hg_rec[RAY_RADIANCE]) );
-  OTK_CHECK( optixSbtRecordPackHeader(s.pg_hit_sh,   &s.hg_rec[RAY_SHADOW]) );
+
+  const uint32_t num_tris = s.h_params.num_triangles;
+  s.hg_rec.resize(static_cast<size_t>(num_tris) * RAY_TYPE_COUNT);
+  for (uint32_t i = 0; i < num_tris; ++i) {
+    HitgroupRecord& rec_rad = s.hg_rec[i * RAY_TYPE_COUNT + RAY_RADIANCE];
+    OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_rad, &rec_rad));
+    rec_rad.data.kd = s.kd[i];
+    rec_rad.data.ke = s.ke[i];
+    HitgroupRecord& rec_sh = s.hg_rec[i * RAY_TYPE_COUNT + RAY_SHADOW];
+    OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_sh, &rec_sh));
+    rec_sh.data.kd = make_float3(0.f,0.f,0.f);
+    rec_sh.data.ke = make_float3(0.f,0.f,0.f);
+  }
 
   CUdeviceptr d_rg=0, d_ms=0, d_hg=0;
   CU_CHECK(cuMemAlloc(&d_rg, sizeof(RaygenRecord)));
   CU_CHECK(cuMemAlloc(&d_ms, sizeof(MissRecord) * RAY_TYPE_COUNT));
-  CU_CHECK(cuMemAlloc(&d_hg, sizeof(HitgroupRecord) * RAY_TYPE_COUNT));
+  CU_CHECK(cuMemAlloc(&d_hg, sizeof(HitgroupRecord) *  s.hg_rec.size()));
   CU_CHECK(cuMemcpyHtoD(d_rg, &s.rg_rec, sizeof(RaygenRecord)));
-  CU_CHECK(cuMemcpyHtoD(d_ms, s.ms_rec.data(), sizeof(MissRecord)*RAY_TYPE_COUNT));
-  CU_CHECK(cuMemcpyHtoD(d_hg, s.hg_rec.data(), sizeof(HitgroupRecord)*RAY_TYPE_COUNT));
+  CU_CHECK(cuMemcpyHtoD(d_ms, s.ms_rec.data(), sizeof(MissRecord) * RAY_TYPE_COUNT));
+  CU_CHECK(cuMemcpyHtoD(d_hg, s.hg_rec.data(), sizeof(HitgroupRecord) * s.hg_rec.size()));
+
+  s.d_sbt_rg = d_rg;
+  s.d_sbt_ms = d_ms;
+  s.d_sbt_hg = d_hg;
 
   s.sbt.raygenRecord                = d_rg;
   s.sbt.missRecordBase              = d_ms;
   s.sbt.missRecordStrideInBytes     = sizeof(MissRecord);
   s.sbt.missRecordCount             = RAY_TYPE_COUNT;
   s.sbt.hitgroupRecordBase          = d_hg;
-  s.sbt.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord);
-  s.sbt.hitgroupRecordCount         = RAY_TYPE_COUNT;
+  s.sbt.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord) * RAY_TYPE_COUNT;
+  s.sbt.hitgroupRecordCount         = num_tris;
 }
 
 // ----- create/destroy --------------------------------------------------------
@@ -576,8 +611,7 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.handle     = st->gas;
   st->h_params.d_vertices = st->d_vertices;
   st->h_params.d_indices  = st->d_indices;
-  st->h_params.d_kd       = st->d_kd;
-  st->h_params.d_ke       = st->d_ke;
+  st->h_params.d_normals  = st->d_normals;
   st->h_params.light_pos  = make_float3(0.f, 1.99f, 0.f);
   st->h_params.light_emit = make_float3(1.f, 1.f, 1.f); // device also uses emissive tris
 
@@ -607,6 +641,24 @@ static State* make_state(uint32_t W, uint32_t H)
 }
 
 // ----- C API -----------------------------------------------------------------
+static void* g_handle = nullptr;
+static int g_last_w = 0;
+static int g_last_h = 0;
+
+static void ensure_handle(int w, int h)
+{
+    if (!g_handle || w != g_last_w || h != g_last_h) {
+        if (g_handle) optix_ctx_destroy(g_handle);
+        g_handle = optix_ctx_create(w, h);
+        g_last_w = w; g_last_h = h;
+        // Set a simple default camera once (tweak if you like)
+        optix_ctx_set_camera(g_handle,
+            0.f, 1.f, 3.f,
+            0.f, 1.f, 0.f,
+            0.f, 1.f, 0.f,
+            45.f);
+    }
+}
 extern "C" __declspec(dllexport)
 void* optix_ctx_create(int width, int height)
 {
@@ -681,7 +733,6 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
     // interleaved RGB float32
     const size_t bytes = size_t(s.width) * size_t(s.height) * 3 * sizeof(float);
     CU_CHECK( cuMemcpyDtoHAsync(out_rgb, s.d_out_rgb, bytes, s.stream) );
-    CU_CHECK( cuStreamSynchronize(s.stream) );
 
     return 0;
 }
@@ -705,7 +756,6 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
 
     const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(float);
     CU_CHECK( cuMemcpyDtoHAsync(out_raw, s.d_out_bayer, bytes, s.stream) );
-    CU_CHECK( cuStreamSynchronize(s.stream) );
 
     return 0;
 }
@@ -713,46 +763,38 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
 extern "C" __declspec(dllexport)
 int optix_render_rgb(int w, int h, int spp, float* out_rgb)
 {
-    static void* handle = nullptr;
-    static int last_w = 0, last_h = 0;
-
-    if (!handle || w != last_w || h != last_h) {
-        if (handle) optix_ctx_destroy(handle);
-        handle = optix_ctx_create(w, h);
-        last_w = w; last_h = h;
-
-        // Set a simple default camera once (tweak if you like)
-        optix_ctx_set_camera(handle,
-            0.f, 1.f, 3.f,   // eye
-            0.f, 1.f, 0.f,   // look at
-            0.f, 1.f, 0.f,   // up
-            45.f);           // vfov degrees
-    }
-
-    return optix_ctx_render_rgb(handle, spp, out_rgb);
+        ensure_handle(w, h);
+    return optix_ctx_render_rgb(g_handle, spp, out_rgb);
 }
 
 extern "C" __declspec(dllexport)
 int optix_render_bayer_f32(int w, int h, int spp, int pat, float* out_raw)
 {
-    static void* handle = nullptr;
-    static int last_w = 0, last_h = 0;
-
-    if (!handle || w != last_w || h != last_h) {
-        if (handle) optix_ctx_destroy(handle);
-        handle = optix_ctx_create(w, h);
-        last_w = w; last_h = h;
-
-        optix_ctx_set_camera(handle,
-            0.f, 1.f, 3.f,
-            0.f, 1.f, 0.f,
-            0.f, 1.f, 0.f,
-            45.f);
-    }
-
+    ensure_handle(w, h);
     (void)spp; // currently unused
-    optix_ctx_set_bayer(handle, pat);
-    return optix_ctx_render_bayer_f32(handle, spp, out_raw);
+    optix_ctx_set_bayer(g_handle, pat);
+    return optix_ctx_render_bayer_f32(g_handle, spp, out_raw);
+}
+extern "C" __declspec(dllexport)
+void optix_synchronize()
+{
+    if (g_handle) {
+        auto& s = *reinterpret_cast<State*>(g_handle);
+        CU_CHECK(cuStreamSynchronize(s.stream));
+    }
+}
+extern "C" __declspec(dllexport)
+void* optix_alloc_host(size_t bytes)
+{
+    void* ptr = nullptr;
+    CU_CHECK(cuMemAllocHost(&ptr, bytes));
+    return ptr;
+}
+
+extern "C" __declspec(dllexport)
+void optix_free_host(void* ptr)
+{
+    if (ptr) CU_CHECK(cuMemFreeHost(ptr));
 }
 
 

@@ -28,6 +28,9 @@ extern "C" {
         pattern: c_int,
         out_raw: *mut f32,
     ) -> c_int;
+    fn optix_alloc_host(bytes: usize) -> *mut std::ffi::c_void;
+    fn optix_free_host(ptr: *mut std::ffi::c_void);
+    fn optix_synchronize();
 }
 
 // Stable shims used by the rest of main():
@@ -46,6 +49,20 @@ fn ffi_render_bayer_f32(w: i32, h: i32, spp: i32, pat: i32, out: *mut f32) -> c_
         return optix_render_bayer_f32(w, h, spp, pat, out);
     }
     //    #[cfg(not(feature="optix"))] unsafe { return gpu_render_bayer_f32(w, h, spp, pat, out); }
+}
+#[inline]
+unsafe fn ffi_alloc_host(bytes: usize) -> *mut std::ffi::c_void {
+    optix_alloc_host(bytes)
+}
+
+#[inline]
+unsafe fn ffi_free_host(ptr: *mut std::ffi::c_void) {
+    optix_free_host(ptr)
+}
+
+#[inline]
+unsafe fn ffi_stream_sync() {
+    optix_synchronize();
 }
 
 // ---- utils, demosaic (unchanged) --------------------------------------------
@@ -461,19 +478,26 @@ fn main() {
     let spp = 32;
     let pattern = 0;
 
-    let mut rgb = vec![0f32; (w * h * 3) as usize];
-    let mut bayer = vec![0f32; (w * h) as usize];
+    let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
+    let bayer_bytes = (w * h) as usize * std::mem::size_of::<f32>();
+
+    let rgb_ptr = unsafe { ffi_alloc_host(rgb_bytes) as *mut f32 };
+    let bayer_ptr = unsafe { ffi_alloc_host(bayer_bytes) as *mut f32 };
+
+    let rgb = unsafe { std::slice::from_raw_parts_mut(rgb_ptr, (w * h * 3) as usize) };
+    let bayer = unsafe { std::slice::from_raw_parts_mut(bayer_ptr, (w * h) as usize) };
 
     let t0 = Instant::now();
-    assert_eq!(ffi_render_rgb(w, h, spp, rgb.as_mut_ptr()), 0);
+    assert_eq!(ffi_render_rgb(w, h, spp, rgb_ptr), 0);
     let t_rgb = t0.elapsed();
 
     let t1 = Instant::now();
-    assert_eq!(
-        ffi_render_bayer_f32(w, h, spp, pattern, bayer.as_mut_ptr()),
-        0
-    );
+    assert_eq!(ffi_render_bayer_f32(w, h, spp, pattern, bayer_ptr), 0);
     let t_raw = t1.elapsed();
+
+    unsafe {
+        ffi_stream_sync();
+    }
 
     let mut lums = Vec::with_capacity((w * h) as usize);
     for i in 0..(w * h) as usize {
@@ -504,4 +528,9 @@ fn main() {
     save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exp_rgb);
     save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, exp_raw);
     println!("✅ Saved pt_bayer.png");
+
+    unsafe {
+        ffi_free_host(rgb_ptr as *mut std::ffi::c_void);
+        ffi_free_host(bayer_ptr as *mut std::ffi::c_void);
+    }
 }

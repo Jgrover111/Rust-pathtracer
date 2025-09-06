@@ -22,11 +22,10 @@ struct Params
   float3                   cam_w;
   OptixTraversableHandle   handle;
 
-  // Geometry and material arrays
+  // Geometry arrays
   CUdeviceptr              d_vertices;   // float3*
   CUdeviceptr              d_indices;    // uint3*
-  CUdeviceptr              d_kd;         // float3*
-  CUdeviceptr              d_ke;         // float3*
+  CUdeviceptr              d_normals;    // float3*
   uint32_t                 num_triangles;
 
   // Simple point light
@@ -37,6 +36,13 @@ struct Params
 extern "C" {
 __constant__ Params params;
 }
+
+// SBT data for each primitive
+struct HitgroupData
+{
+  float3 kd; // diffuse reflectance
+  float3 ke; // emission
+};
 
 enum {
     RAY_TYPE_RADIANCE = 0,
@@ -155,10 +161,6 @@ struct PRD {
     int    done;
 };
 
-struct PRDShadow {
-    int occluded;
-};
-
 // --- access helpers for CUdeviceptr arrays --------------------------------
 
 template<typename T>
@@ -185,8 +187,7 @@ extern "C" __global__ void __miss__ms_shadow()
 
 extern "C" __global__ void __anyhit__ah_shadow()
 {
-    PRDShadow& sprd = *unpackPtr<PRDShadow>();
-    sprd.occluded = 1;
+    optixSetPayload_0(1u);
     optixTerminateRay();
 }
 
@@ -213,13 +214,12 @@ extern "C" __global__ void __closesthit__ch()
     const float b0 = 1.0f - b1 - b2;
 
     const float3 P  = v0 * b0 + v1 * b1 + v2 * b2;
-    const float3 Ng = normalize(cross(v1 - v0, v2 - v0));
+    const float3 Ng = reinterpret_cast<const float3*>(params.d_normals)[prim];
 
-    // Fetch per-triangle materials from Params
-    const float3* kd_arr = reinterpret_cast<const float3*>(params.d_kd);
-    const float3* ke_arr = reinterpret_cast<const float3*>(params.d_ke);
-    const float3 kd = kd_arr[prim];
-    const float3 ke = ke_arr[prim];
+    // Fetch per-triangle materials from SBT
+    const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());
+    const float3 kd = hg->kd;
+    const float3 ke = hg->ke;
 
     // Direct light from point light
     const float3 Lpos = params.light_pos;
@@ -227,8 +227,7 @@ extern "C" __global__ void __closesthit__ch()
     const float dist = fmaxf(length(L), 1e-3f);
     const float3 wi = L / dist;
 
-    PRDShadow sprd; sprd.occluded = 0;
-    unsigned int su0, su1; packPtr(&sprd, su0, su1);
+    unsigned int occluded = 0u;
     optixTrace(
         params.handle,
         P + Ng * 1e-3f,
@@ -241,9 +240,10 @@ extern "C" __global__ void __closesthit__ch()
         RAY_TYPE_SHADOW,
         RAY_TYPE_COUNT,
         RAY_TYPE_SHADOW,
-        su0, su1);
+        occluded);
 
-    const float visibility = sprd.occluded ? 0.0f : 1.0f;
+    occluded = optixGetPayload_0();
+    const float visibility = occluded ? 0.0f : 1.0f;
     const float nDotL = fmaxf(0.0f, dot(Ng, wi));
     float3 Lo = kd * params.light_emit * (visibility * nDotL);
 
