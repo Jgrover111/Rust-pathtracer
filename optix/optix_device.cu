@@ -114,6 +114,19 @@ static __forceinline__ __device__ float rnd(unsigned int& state) {
   return float(lcg(state) & 0x00FFFFFFu) / float(0x01000000u);
 }
 
+static __forceinline__ __device__ void make_onb(const float3& n, float3& t, float3& b)
+{
+  if (n.z < -0.9999999f) {
+    t = make_float3(0.0f, -1.0f, 0.0f);
+    b = make_float3(-1.0f, 0.0f, 0.0f);
+  } else {
+    const float a = 1.0f / (1.0f + n.z);
+    const float naxy = -n.x * n.y * a;
+    t = make_float3(1.0f - n.x * n.x * a, naxy, -n.x);
+    b = make_float3(naxy, 1.0f - n.y * n.y * a, -n.y);
+  }
+}
+
 // --- payload packing -------------------------------------------------------
 
 static __forceinline__ __device__ void packPtr(void* ptr, unsigned int& u0, unsigned int& u1) {
@@ -246,8 +259,8 @@ extern "C" __global__ void __closesthit__ch()
     const float sinTheta = sqrtf(r2);
     float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
 
-    float3 tangent = normalize(cross(Ng, fabsf(Ng.z) < 0.999f ? make_float3(0,0,1) : make_float3(1,0,0)));
-    float3 bitangent = cross(tangent, Ng);
+    float3 tangent, bitangent;
+    make_onb(Ng, tangent, bitangent);
     float3 newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
 
     prd.origin = P + Ng * 1e-3f;
