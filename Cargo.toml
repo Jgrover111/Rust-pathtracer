@@ -8,7 +8,7 @@ build = "build.rs"
 png = "0.18"
 ravif = "0.12"
 rgb = "0.8"
-rav1e = { version = "0.8.1", default-features = false }
+rav1e = "0.8.1"
 avif-parse = "1.3"
 avif-serialize = "0.8"
 

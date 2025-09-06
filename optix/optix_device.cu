@@ -10,7 +10,7 @@
 struct Params
 {
   CUdeviceptr              out_rgb;      // float3*
-  CUdeviceptr              out_raw16;    // uint16_t*
+  CUdeviceptr              out_bayer;    // float*
   int                      width;
   int                      height;
   int                      spp;
@@ -284,11 +284,6 @@ extern "C" __global__ void __closesthit__ch()
 
 // --- Raygen program --------------------------------------------------------
 
-static __forceinline__ __device__ uint16_t to_u16(float x) {
-  x = clamp01(x);
-  return (uint16_t)(x * 65535.0f + 0.5f);
-}
-
 static __forceinline__ __device__ float3 sample_camera_dir(int x, int y, const float2& jitter)
 {
   const uint3  dim = optixGetLaunchDimensions();
@@ -322,7 +317,7 @@ extern "C" __global__ void __raygen__rg()
   // Trace radiance
   const float3 org = params.cam_eye;
   float3 sum_rgb = make3(0.0f);
-  float sum_raw = 0.0f;
+  float sum_bayer = 0.0f;
   const int ch = bayer_channel_for(x, y, params.bayer_pattern);
   unsigned int seed = params.frame * 9781u + dst * 6271u;
 
@@ -354,8 +349,8 @@ extern "C" __global__ void __raygen__rg()
         u0, u1);
       if (params.out_rgb)
         sum_rgb += prd.radiance * throughput;
-      if (params.out_raw16)
-        sum_raw += (ch==0 ? prd.radiance.x : (ch==1 ? prd.radiance.y : prd.radiance.z)) * throughput_ch;
+      if (params.out_bayer)
+        sum_bayer += (ch==0 ? prd.radiance.x : (ch==1 ? prd.radiance.y : prd.radiance.z)) * throughput_ch;
     }
 
     seed = prd.seed;
@@ -363,13 +358,13 @@ extern "C" __global__ void __raygen__rg()
 
   // Write outputs
   if (params.out_rgb) {
-	float3 rad = sum_rgb / float(params.spp);
+		float3 rad = sum_rgb / float(params.spp);
     float3* out = ptr_at<float3>(params.out_rgb);
     out[dst] = rad;
   }
-  if (params.out_raw16) {
-	float rad = sum_raw / float(params.spp);
-    unsigned short* out = ptr_at<unsigned short>(params.out_raw16);
-    out[dst] = to_u16(rad);
+  if (params.out_bayer) {
+		float rad = fmaxf(sum_bayer / float(params.spp), 0.f);
+    float* out = ptr_at<float>(params.out_bayer);
+    out[dst] = rad;
   }
 }

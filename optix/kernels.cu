@@ -265,7 +265,11 @@ __global__ void k_render_rgb(int W,int H,int spp,float* out_rgb){
         float3 c = radiance(ray, rng, MAX_DEPTH);
         accum = accum + c;
     }
-    float3 col = clamp3(accum * (1.0f / (float)spp), 0.f, 1e6f);
+    float inv_spp = 1.0f / (float)spp;
+    float3 col = f3(
+        fmaxf(accum.x * inv_spp, 0.f),
+        fmaxf(accum.y * inv_spp, 0.f),
+        fmaxf(accum.z * inv_spp, 0.f));
     int idx = (y*W + x)*3;
     out_rgb[idx+0] = col.x;
     out_rgb[idx+1] = col.y;
@@ -283,7 +287,7 @@ __device__ inline int bayer_channel_for(int x,int y,int pattern){
     }
 }
 
-__global__ void k_render_bayer_raw16(int W,int H,int spp,int pattern,uint16_t* out_raw){
+__global__ void k_render_bayer_f32(int W,int H,int spp,int pattern,float* out_raw){
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -296,8 +300,8 @@ __global__ void k_render_bayer_raw16(int W,int H,int spp,int pattern,uint16_t* o
         float v = radiance_scalar(ray, rng, MAX_DEPTH, ch);
         accum += v;
     }
-    float m = fminf(fmaxf(accum * (1.0f / (float)spp), 0.f), 1.f);
-    out_raw[y*W + x] = (uint16_t)lrintf(m * 65535.0f);
+    float m = fmaxf(accum * (1.0f / (float)spp), 0.f);
+    out_raw[y*W + x] = m;
 }
 
 extern "C" int gpu_render_rgb(int W,int H,int spp,float* out_rgb){
@@ -314,15 +318,15 @@ extern "C" int gpu_render_rgb(int W,int H,int spp,float* out_rgb){
     return 0;
 }
 
-extern "C" int gpu_render_bayer_raw16(int W,int H,int spp,int pattern,uint16_t* out_raw16){
-    if (!out_raw16 || W<=0 || H<=0 || spp<=0) return 1;
-    uint16_t* d_raw=nullptr;
-    cudaError_t err = cudaMalloc(&d_raw, (size_t)W*(size_t)H*sizeof(uint16_t));
+extern "C" int gpu_render_bayer_f32(int W,int H,int spp,int pattern,float* out_raw){
+    if (!out_raw || W<=0 || H<=0 || spp<=0) return 1;
+    float* d_raw=nullptr;
+    cudaError_t err = cudaMalloc(&d_raw, (size_t)W*(size_t)H*sizeof(float));
     if (err != cudaSuccess) return 1;
     dim3 B(16,16); dim3 G((W+B.x-1)/B.x, (H+B.y-1)/B.y);
-    k_render_bayer_raw16<<<G,B>>>(W,H,spp,pattern,d_raw);
+    k_render_bayer_f32<<<G,B>>>(W,H,spp,pattern,d_raw);
     err = cudaGetLastError(); if (err != cudaSuccess){ cudaFree(d_raw); return 1; }
-    err = cudaMemcpy(out_raw16, d_raw, (size_t)W*(size_t)H*sizeof(uint16_t), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(out_raw, d_raw, (size_t)W*(size_t)H*sizeof(float), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess){ cudaFree(d_raw); return 1; }
     cudaFree(d_raw);
     return 0;

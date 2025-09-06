@@ -11,7 +11,7 @@ use avif_serialize::constants::{ColorPrimaries, TransferCharacteristics, MatrixC
 //#[cfg(not(feature="optix"))]
 //extern "C" {
 //    fn gpu_render_rgb(w: c_int, h: c_int, spp: c_int, out_rgb: *mut f32) -> c_int;
-//    fn gpu_render_bayer_raw16(w: c_int, h: c_int, spp: c_int, pattern: c_int, out_raw16: *mut u16) -> c_int;
+//    fn gpu_render_bayer_f32(w: c_int, h: c_int, spp: c_int, pattern: c_int, out_raw: *mut f32) -> c_int;
 //}
 
 // Optional OptiX path: when you wire your OptiX wrapper to export these
@@ -19,7 +19,7 @@ use avif_serialize::constants::{ColorPrimaries, TransferCharacteristics, MatrixC
 //#[cfg(feature="optix")]
 extern "C" {
     fn optix_render_rgb(w: c_int, h: c_int, spp: c_int, out_rgb: *mut f32) -> c_int;
-    fn optix_render_bayer_raw16(w: c_int, h: c_int, spp: c_int, pattern: c_int, out_raw16: *mut u16) -> c_int;
+    fn optix_render_bayer_f32(w: c_int, h: c_int, spp: c_int, pattern: c_int, out_raw: *mut f32) -> c_int;
 }
 
 // Stable shims used by the rest of main():
@@ -30,10 +30,10 @@ fn ffi_render_rgb(w: i32, h: i32, spp: i32, out: *mut f32) -> c_int {
 //    #[cfg(not(feature="optix"))] unsafe { return gpu_render_rgb(w, h, spp, out); }
 }
 #[inline]
-fn ffi_render_bayer_raw16(w: i32, h: i32, spp: i32, pat: i32, out: *mut u16) -> c_int {
+fn ffi_render_bayer_f32(w: i32, h: i32, spp: i32, pat: i32, out: *mut f32) -> c_int {
 //    #[cfg(feature="optix")]
-    unsafe { return optix_render_bayer_raw16(w, h, spp, pat, out); }
-//    #[cfg(not(feature="optix"))] unsafe { return gpu_render_bayer_raw16(w, h, spp, pat, out); }
+    unsafe { return optix_render_bayer_f32(w, h, spp, pat, out); }
+//    #[cfg(not(feature="optix"))] unsafe { return gpu_render_bayer_f32(w, h, spp, pat, out); }
 }
 
 // ---- utils, demosaic (unchanged) --------------------------------------------
@@ -63,13 +63,13 @@ fn setf(img: &mut [f32], w: i32, h: i32, x: i32, y: i32, v: f32) {
     img[idx(xx, yy, w)] = v;
 }
 
-fn demosaic_amaze(raw16: &[u16], w: i32, h: i32, pattern: i32) -> Vec<f32> {
+fn demosaic_amaze(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     let n = (w*h) as usize;
     let mut r = vec![0f32; n];
     let mut g = vec![0f32; n];
     let mut b = vec![0f32; n];
     for y in 0..h { for x in 0..w {
-        let v = raw16[idx(x, y, w)] as f32 * (1.0 / 65535.0);
+        let v = raw[idx(x, y, w)];
         match cfa_at(x, y, pattern) {
             CFA::R => r[idx(x, y, w)] = v,
             CFA::G => g[idx(x, y, w)] = v,
@@ -310,18 +310,18 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 1024;
+    let spp = 32;
     let pattern = 0;
 
     let mut rgb = vec![0f32; (w*h*3) as usize];
-    let mut raw16 = vec![0u16; (w*h) as usize];
+    let mut bayer = vec![0f32; (w*h) as usize];
 
     let t0 = Instant::now();
     assert_eq!(ffi_render_rgb(w, h, spp, rgb.as_mut_ptr()), 0);
     let t_rgb = t0.elapsed();
 
     let t1 = Instant::now();
-    assert_eq!(ffi_render_bayer_raw16(w, h, spp, pattern, raw16.as_mut_ptr()), 0);
+    assert_eq!(ffi_render_bayer_f32(w, h, spp, pattern, bayer.as_mut_ptr()), 0);
     let t_raw = t1.elapsed();
 
     let mut lums = Vec::with_capacity((w*h) as usize);
@@ -332,14 +332,12 @@ fn main() {
     save_png_srgb_from_acescg("pt.png", w, h, &rgb, exp_rgb);
     println!("✅ Saved pt.png (render {:?})", t_rgb);
 
-    let demosaiced = demosaic_amaze(&raw16, w, h, pattern);
+    let demosaiced = demosaic_amaze(&bayer, w, h, pattern);
     let mut l2 = Vec::with_capacity((w*h) as usize);
     for i in 0..(w*h) as usize { let r=demosaiced[i*3];let g=demosaiced[i*3+1];let b=demosaiced[i*3+2]; l2.push(0.2126*r+0.7152*g+0.0722*b); }
     let exp_raw = 0.85 / percentile(&l2, 0.85);
 
-    let zeros = raw16.iter().filter(|&&v| v==0).count() as f32 / (raw16.len() as f32) * 100.0;
-    let whites = raw16.iter().filter(|&&v| v>=65535).count() as f32 / (raw16.len() as f32) * 100.0;
-    println!("RAW16 render: {:?}  |  zeros: {:.2}%, >=white: {:.2}%", t_raw, zeros, whites);
+    println!("Bayer render: {:?}", t_raw);
 
     save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exp_raw);
     save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exp_rgb, 1000.0);

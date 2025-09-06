@@ -128,7 +128,7 @@ struct Params
 {
   // output
   CUdeviceptr out_rgb;        // float3*
-  CUdeviceptr out_raw16;      // uint16_t*
+  CUdeviceptr out_bayer;      // float*
   uint32_t    width;
   uint32_t    height;
   int         spp;
@@ -206,9 +206,9 @@ struct State
 
   // Output
   CUdeviceptr           d_out_rgb   = 0; // float3*
-  CUdeviceptr           d_out_raw16 = 0; // uint16_t*
+  CUdeviceptr           d_out_bayer = 0; // float*
   float*                h_out_rgb   = nullptr; // pinned host float3*
-  uint16_t*             h_out_raw16 = nullptr; // pinned host uint16_t*
+  uint16_t*             h_out_bayer = nullptr; // pinned host float*
   uint32_t              width=0, height=0;
 
   // options
@@ -216,9 +216,9 @@ struct State
 
   ~State() {
     if (h_out_rgb)   cuMemFreeHost(h_out_rgb);
-    if (h_out_raw16) cuMemFreeHost(h_out_raw16);
+    if (h_out_bayer) cuMemFreeHost(h_out_bayer);
     if (d_out_rgb)   cuMemFree(d_out_rgb);
-    if (d_out_raw16) cuMemFree(d_out_raw16);
+    if (d_out_bayer) cuMemFree(d_out_bayer);
     if (d_params)    cuMemFree(d_params);
 
     if (d_vertices)  cuMemFree(d_vertices);
@@ -582,16 +582,16 @@ static State* make_state(uint32_t W, uint32_t H)
   createPipeline(*st);
 
   // params/output buffers
-  size_t rgbBytes   = size_t(W) * size_t(H) * sizeof(float3);
-  size_t raw16Bytes = size_t(W) * size_t(H) * sizeof(uint16_t);
+  size_t rgbBytes    = size_t(W) * size_t(H) * sizeof(float3);
+  size_t bayerBytes  = size_t(W) * size_t(H) * sizeof(float);
 
   CU_CHECK(cuMemAlloc(&st->d_out_rgb,   rgbBytes));
-  CU_CHECK(cuMemAlloc(&st->d_out_raw16, raw16Bytes));
+  CU_CHECK(cuMemAlloc(&st->d_out_bayer, bayerBytes));
   CU_CHECK(cuMemAllocHost(reinterpret_cast<void**>(&st->h_out_rgb),   rgbBytes));
-  CU_CHECK(cuMemAllocHost(reinterpret_cast<void**>(&st->h_out_raw16), raw16Bytes));
+  CU_CHECK(cuMemAllocHost(reinterpret_cast<void**>(&st->h_out_bayer), bayerBytes));
 
   st->h_params.out_rgb   = st->d_out_rgb;
-  st->h_params.out_raw16 = st->d_out_raw16;
+  st->h_params.out_bayer = st->d_out_bayer;
   st->h_params.width     = W;
   st->h_params.height    = H;
   st->h_params.spp     = 1;
@@ -685,7 +685,7 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
     return 0;
 }
 
-static int optix_ctx_render_bayer_raw16(void* handle, int spp, uint16_t* out_raw16)
+static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
 {
     auto& s = *reinterpret_cast<State*>(handle);
 
@@ -702,10 +702,10 @@ static int optix_ctx_render_bayer_raw16(void* handle, int spp, uint16_t* out_raw
         /*SBT*/ &s.sbt,
         /*w,h,d*/ s.width, s.height, 1) );
 
-    const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(uint16_t);
-    CU_CHECK( cuMemcpyDtoHAsync(s.h_out_raw16, s.d_out_raw16, bytes, 0) );
+    const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(float);
+    CU_CHECK( cuMemcpyDtoHAsync(s.h_out_bayer, s.d_out_bayer, bytes, 0) );
     CU_CHECK( cuStreamSynchronize(0) );
-    std::memcpy(out_raw16, s.h_out_raw16, bytes);
+    std::memcpy(out_raw, s.h_out_bayer, bytes);
 
     return 0;
 }
@@ -733,7 +733,7 @@ int optix_render_rgb(int w, int h, int spp, float* out_rgb)
 }
 
 extern "C" __declspec(dllexport)
-int optix_render_bayer_raw16(int w, int h, int spp, int pat, uint16_t* out_raw16)
+int optix_render_bayer_f32(int w, int h, int spp, int pat, float* out_raw)
 {
     static void* handle = nullptr;
     static int last_w = 0, last_h = 0;
@@ -752,7 +752,7 @@ int optix_render_bayer_raw16(int w, int h, int spp, int pat, uint16_t* out_raw16
 
     (void)spp; // currently unused
     optix_ctx_set_bayer(handle, pat);
-    return optix_ctx_render_bayer_raw16(handle, spp, out_raw16);
+    return optix_ctx_render_bayer_f32(handle, spp, out_raw);
 }
 
 
