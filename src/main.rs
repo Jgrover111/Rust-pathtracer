@@ -2,7 +2,9 @@ use std::time::Instant;
 use std::ffi::c_int;
 use std::fs::File;
 use rav1e::prelude::PixelRange;
-use ravif::{BitDepth, Color, ColorPrimaries, TransferCharacteristics, MatrixCoefficients};
+use ravif::{BitDepth, MatrixCoefficients};
+use avif_parse::read_avif;
+use avif_serialize::constants::{ColorPrimaries, TransferCharacteristics, MatrixCoefficients as SerializeMatrixCoefficients};
 
 // ---- FFI selection ----------------------------------------------------------
 // Default: plain CUDA kernels (what you have working now)
@@ -275,13 +277,7 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
     let enc = ravif::Encoder::new()
         .with_quality(90.0)
         .with_speed(6)
-        .with_bit_depth(BitDepth::Ten)
-        .with_color(Color {
-            primaries: ColorPrimaries::BT2020,
-            transfer: TransferCharacteristics::SMPTE2084,
-            matrix: MatrixCoefficients::BT2020NCL,
-            full_range: true,
-        });
+        .with_bit_depth(BitDepth::Ten);
     let avif = enc
         .encode_raw_planes_10_bit(
             w as usize,
@@ -293,7 +289,21 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
         )
         .expect("avif encode");
 
-    std::fs::write(path, &avif.avif_file).unwrap();
+    let parsed = read_avif(&mut avif.avif_file.as_slice()).expect("parse avif");
+    let avif_bytes = avif_serialize::Aviffy::new()
+        .set_color_primaries(ColorPrimaries::Bt2020)
+        .set_transfer_characteristics(TransferCharacteristics::Smpte2084)
+        .set_matrix_coefficients(SerializeMatrixCoefficients::Bt2020Ncl)
+        .set_full_color_range(true)
+        .to_vec(
+            &parsed.primary_item,
+            parsed.alpha_item.as_deref(),
+            w as u32,
+            h as u32,
+            10,
+        );
+
+    std::fs::write(path, &avif_bytes).unwrap();
 }
 
 // ---- main -------------------------------------------------------------------
