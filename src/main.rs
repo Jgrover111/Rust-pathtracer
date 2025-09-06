@@ -2,6 +2,8 @@ use std::time::Instant;
 use std::ffi::c_int;
 use std::fs::File;
 use std::io::Write;
+use avif_serialize::{Aviffy, constants::{ColorPrimaries, TransferCharacteristics, MatrixCoefficients}};
+use avif_parse::AvifData;
 
 // ---- FFI selection ----------------------------------------------------------
 // Default: plain CUDA kernels (what you have working now)
@@ -239,7 +241,9 @@ fn pq_oetf_from_nits(nits: f32) -> f32 {
 
 fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32], exposure: f32, peak_nits: f32) {
     let n = (w*h) as usize;
-    let mut rgb8: Vec<rgb::RGB<u8>> = Vec::with_capacity(n);
+    let mut rgb16: Vec<rgb::RGB<u16>> = Vec::with_capacity(n);
+    let depth: u8 = 10;
+    let max_value: u16 = (1u16 << depth) - 1;
     for y in 0..h { for x in 0..w {
         let i = idx(x,y,w)*3;
         let a=[img_aces[i]*exposure, img_aces[i+1]*exposure, img_aces[i+2]*exposure];
@@ -248,23 +252,45 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
         let r = pq_oetf_from_nits(rec2020[0].max(0.0)*peak_nits);
         let g = pq_oetf_from_nits(rec2020[1].max(0.0)*peak_nits);
         let b = pq_oetf_from_nits(rec2020[2].max(0.0)*peak_nits);
-        let r8 = (r*255.0 + 0.5) as u8;
-        let g8 = (g*255.0 + 0.5) as u8;
-        let b8 = (b*255.0 + 0.5) as u8;
-        rgb8.push(rgb::RGB{ r: r8, g: g8, b: b8 });
+        let r16 = (r * max_value as f32 + 0.5) as u16;
+        let g16 = (g * max_value as f32 + 0.5) as u16;
+        let b16 = (b * max_value as f32 + 0.5) as u16;
+        rgb16.push(rgb::RGB{ r: r16, g: g16, b: b16 });
     }}
-    let img = imgref::Img::new(rgb8.as_slice(), w as usize, h as usize);
-    let enc = ravif::Encoder::new().with_quality(90.0).with_speed(6);
+    let img = imgref::Img::new(rgb16.as_slice(), w as usize, h as usize);
+    let enc = ravif::Encoder::new()
+        .with_quality(90.0)
+        .with_speed(6)
+        .with_bit_depth(BitDepth::Ten);
     let avif = enc.encode_rgb(img).expect("avif encode");
+
+    let mut cursor = &avif.avif_file[..];
+    let parsed = AvifData::from_reader(&mut cursor).expect("parse avif");
+    let md = parsed.primary_item_metadata().expect("av1 metadata");
+
+    let mut aviffy = Aviffy::new();
+    aviffy
+        .set_width(md.max_frame_width.get())
+        .set_height(md.max_frame_height.get())
+        .set_bit_depth(md.bit_depth)
+        .set_color_primaries(ColorPrimaries::Bt2020)
+        .set_transfer_characteristics(TransferCharacteristics::Smpte2084)
+        .set_matrix_coefficients(MatrixCoefficients::Bt2020Ncl)
+        .set_full_color_range(true);
+
+    let mut out = Vec::new();
+    aviffy
+        .write_slice(&mut out, &parsed.primary_item, parsed.alpha_item.as_deref())
+        .expect("serialize avif");
     let mut f = File::create(path).unwrap();
-    f.write_all(&avif.avif_file).unwrap();
+    f.write_all(&out).unwrap();
 }
 
 // ---- main -------------------------------------------------------------------
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 1024;
+    let spp = 32;
     let pattern = 0;
 
     let mut rgb = vec![0f32; (w*h*3) as usize];
