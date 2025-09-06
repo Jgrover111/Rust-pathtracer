@@ -214,7 +214,7 @@ extern "C" __global__ void __closesthit__ch()
     const float b0 = 1.0f - b1 - b2;
 
     const float3 P  = v0 * b0 + v1 * b1 + v2 * b2;
-    const float3 Ng = reinterpret_cast<const float3*>(params.d_normals)[prim];
+    const float3 Ng = normalize3(reinterpret_cast<const float3*>(params.d_normals)[prim]);
 
     // Fetch per-triangle materials from SBT
     const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());

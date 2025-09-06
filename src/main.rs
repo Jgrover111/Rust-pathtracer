@@ -317,7 +317,7 @@ fn percentile(arr: &[f32], p: f32) -> f32 {
         return 1.0;
     }
     let k = ((n as f32 - 1.0) * p).round().max(0.0) as usize;
-    let _ = v.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap());
+    let _ = v.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
     v[k].max(1e-6)
 }
 
@@ -475,7 +475,7 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 32;
+    let spp = 256;
     let pattern = 0;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
