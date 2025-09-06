@@ -1,7 +1,7 @@
 use std::time::Instant;
 use std::ffi::c_int;
 use std::fs::File;
-use rav1e::color::PixelRange;
+use rav1e::prelude::PixelRange;
 use ravif::{BitDepth, MatrixCoefficients};
 use avif_parse::read_avif;
 use avif_serialize::constants::{ColorPrimaries, TransferCharacteristics, MatrixCoefficients as SerializeMatrixCoefficients};
