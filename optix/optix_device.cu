@@ -259,7 +259,7 @@ extern "C" __global__ void __raygen__rg()
   const int    y   = int(idx.y);
   const int    W   = params.width;
   const int    H   = params.height;
-  const int    dst = (H - 1 - y) * W + x;
+  const int    dst = y * W + x;
 
   // Trace radiance
   RadiancePRD prd;
