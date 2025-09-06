@@ -237,7 +237,7 @@ extern "C" __global__ void __closesthit__ch()
         dist - 1e-3f,
         0.0f,
         1,
-        OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
+        OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
         RAY_TYPE_SHADOW,
         RAY_TYPE_COUNT,
         RAY_TYPE_SHADOW,

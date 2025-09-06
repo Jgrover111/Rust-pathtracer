@@ -397,9 +397,9 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
             let t = tonemap_aces(a);
             let rec2020 = mul3(M_ACESCG_TO_REC2020, t);
             // ACES tonemapping is defined for a 100 nit reference display.
-            let r = pq_oetf_from_nits(rec2020[0].max(0.0) * 100.0);
-            let g = pq_oetf_from_nits(rec2020[1].max(0.0) * 100.0);
-            let b = pq_oetf_from_nits(rec2020[2].max(0.0) * 100.0);
+            let r = pq_oetf_from_nits(rec2020[0].max(0.0) * 200.0);
+            let g = pq_oetf_from_nits(rec2020[1].max(0.0) * 200.0);
+            let b = pq_oetf_from_nits(rec2020[2].max(0.0) * 200.0);
             let r10 = (r * 1023.0 + 0.5) as u16;
             let g10 = (g * 1023.0 + 0.5) as u16;
             let b10 = (b * 1023.0 + 0.5) as u16;
@@ -458,7 +458,7 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 2048;
+    let spp = 32;
     let pattern = 0;
 
     let mut rgb = vec![0f32; (w * h * 3) as usize];

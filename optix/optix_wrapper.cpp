@@ -207,19 +207,17 @@ struct State
   // Output
   CUdeviceptr           d_out_rgb   = 0; // float3*
   CUdeviceptr           d_out_bayer = 0; // float*
-  float*                h_out_rgb   = nullptr; // pinned host float3*
-  uint16_t*             h_out_bayer = nullptr; // pinned host float*
   uint32_t              width=0, height=0;
+  CUstream              stream = nullptr;
 
   // options
   int                   bayer_pattern = 0;
 
   ~State() {
-    if (h_out_rgb)   cuMemFreeHost(h_out_rgb);
-    if (h_out_bayer) cuMemFreeHost(h_out_bayer);
     if (d_out_rgb)   cuMemFree(d_out_rgb);
     if (d_out_bayer) cuMemFree(d_out_bayer);
     if (d_params)    cuMemFree(d_params);
+    if (stream)      cuStreamDestroy(stream);
 
     if (d_vertices)  cuMemFree(d_vertices);
     if (d_indices)   cuMemFree(d_indices);
@@ -535,6 +533,11 @@ static State* make_state(uint32_t W, uint32_t H)
   auto st = std::make_unique<State>();
   st->cuCtx = ctxCU;
   OptixDeviceContextOptions opts {};
+#ifndef NDEBUG
+  opts.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+#else
+  opts.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_NONE;
+#endif
   opts.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
   opts.logCallbackFunction = [](unsigned int level, const char* tag, const char* msg, void*) {
     fprintf(stderr, "[OPTIX][%u][%s] %s\n", level, tag ? tag : "", msg ? msg : "");
@@ -587,8 +590,7 @@ static State* make_state(uint32_t W, uint32_t H)
 
   CU_CHECK(cuMemAlloc(&st->d_out_rgb,   rgbBytes));
   CU_CHECK(cuMemAlloc(&st->d_out_bayer, bayerBytes));
-  CU_CHECK(cuMemAllocHost(reinterpret_cast<void**>(&st->h_out_rgb),   rgbBytes));
-  CU_CHECK(cuMemAllocHost(reinterpret_cast<void**>(&st->h_out_bayer), bayerBytes));
+  CU_CHECK(cuStreamCreate(&st->stream, CU_STREAM_NON_BLOCKING));
 
   st->h_params.out_rgb   = st->d_out_rgb;
   st->h_params.out_bayer = st->d_out_bayer;
@@ -670,7 +672,7 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
 
     OTK_CHECK( optixLaunch(
         s.pipeline,
-        /*stream*/ 0,
+        /*stream*/ s.stream,
         /*params*/ s.d_params,
         /*paramsSize*/ sizeof(Params),
         /*SBT*/ &s.sbt,
@@ -678,9 +680,8 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
 
     // interleaved RGB float32
     const size_t bytes = size_t(s.width) * size_t(s.height) * 3 * sizeof(float);
-    CU_CHECK( cuMemcpyDtoHAsync(s.h_out_rgb, s.d_out_rgb, bytes, 0) );
-    CU_CHECK( cuStreamSynchronize(0) );
-    std::memcpy(out_rgb, s.h_out_rgb, bytes);
+    CU_CHECK( cuMemcpyDtoHAsync(out_rgb, s.d_out_rgb, bytes, s.stream) );
+    CU_CHECK( cuStreamSynchronize(s.stream) );
 
     return 0;
 }
@@ -696,16 +697,15 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
 
     OTK_CHECK( optixLaunch(
         s.pipeline,
-        /*stream*/ 0,
+        /*stream*/ s.stream,
         /*params*/ s.d_params,
         /*paramsSize*/ sizeof(Params),
         /*SBT*/ &s.sbt,
         /*w,h,d*/ s.width, s.height, 1) );
 
     const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(float);
-    CU_CHECK( cuMemcpyDtoHAsync(s.h_out_bayer, s.d_out_bayer, bytes, 0) );
-    CU_CHECK( cuStreamSynchronize(0) );
-    std::memcpy(out_raw, s.h_out_bayer, bytes);
+    CU_CHECK( cuMemcpyDtoHAsync(out_raw, s.d_out_bayer, bytes, s.stream) );
+    CU_CHECK( cuStreamSynchronize(s.stream) );
 
     return 0;
 }
