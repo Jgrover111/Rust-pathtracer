@@ -159,13 +159,17 @@ fn demosaic_amaze(raw16: &[u16], w: i32, h: i32, pattern: i32) -> Vec<f32> {
         setf(&mut rg2,w,h,x,y,(w_h*rgh + w_v*rgv)/(w_h+w_v));
         setf(&mut bg2,w,h,x,y,(w_h*bgh + w_v*bgv)/(w_h+w_v));
     }}
-    for i in 0..n { r[i] = (g[i] + rg2[i]).clamp(0.0,1.0); b[i] = (g[i] + bg2[i]).clamp(0.0,1.0); }
+    for i in 0..n {
+        // Preserve highlights by avoiding upper clipping during reconstruction
+        r[i] = (g[i] + rg2[i]).max(0.0);
+        b[i] = (g[i] + bg2[i]).max(0.0);
+    }
     let mut out = vec![0f32; n*3];
     for y in 0..h { for x in 0..w {
         let i = idx(x,y,w);
-        out[i*3+0] = r[i].clamp(0.0, 1.0);
-        out[i*3+1] = g[i].clamp(0.0, 1.0);
-        out[i*3+2] = b[i].clamp(0.0, 1.0);
+        out[i*3+0] = r[i].max(0.0);
+        out[i*3+1] = g[i].max(0.0);
+        out[i*3+2] = b[i].max(0.0);
     }}
     out
 }
