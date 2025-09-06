@@ -207,12 +207,16 @@ struct State
   // Output
   CUdeviceptr           d_out_rgb   = 0; // float3*
   CUdeviceptr           d_out_raw16 = 0; // uint16_t*
+  float*                h_out_rgb   = nullptr; // pinned host float3*
+  uint16_t*             h_out_raw16 = nullptr; // pinned host uint16_t*
   uint32_t              width=0, height=0;
 
   // options
   int                   bayer_pattern = 0;
 
   ~State() {
+    if (h_out_rgb)   cuMemFreeHost(h_out_rgb);
+    if (h_out_raw16) cuMemFreeHost(h_out_raw16);
     if (d_out_rgb)   cuMemFree(d_out_rgb);
     if (d_out_raw16) cuMemFree(d_out_raw16);
     if (d_params)    cuMemFree(d_params);
@@ -324,10 +328,10 @@ static void buildCornell(State& s)
     };
     addRect(p3,p2,p1,p0); // bottom
     addRect(q3,q2,q1,q0); // top
-    addRect(p0,p1,q1,q0);
-    addRect(p1,p2,q2,q1);
-    addRect(p2,p3,q3,q2);
-    addRect(p3,p0,q0,q3);
+    addRect(p1,p0,q0,q1);
+    addRect(p2,p1,q1,q2);
+    addRect(p3,p2,q2,q3);
+    addRect(p0,p3,q3,q0);
   }
 
   // upload
@@ -583,6 +587,8 @@ static State* make_state(uint32_t W, uint32_t H)
 
   CU_CHECK(cuMemAlloc(&st->d_out_rgb,   rgbBytes));
   CU_CHECK(cuMemAlloc(&st->d_out_raw16, raw16Bytes));
+  CU_CHECK(cuMemAllocHost(reinterpret_cast<void**>(&st->h_out_rgb),   rgbBytes));
+  CU_CHECK(cuMemAllocHost(reinterpret_cast<void**>(&st->h_out_raw16), raw16Bytes));
 
   st->h_params.out_rgb   = st->d_out_rgb;
   st->h_params.out_raw16 = st->d_out_raw16;
@@ -670,11 +676,11 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
         /*SBT*/ &s.sbt,
         /*w,h,d*/ s.width, s.height, 1) );
 
-    CU_CHECK( cuStreamSynchronize(0) );
-
     // interleaved RGB float32
     const size_t bytes = size_t(s.width) * size_t(s.height) * 3 * sizeof(float);
-    CU_CHECK( cuMemcpyDtoH(out_rgb, s.d_out_rgb, bytes) );
+    CU_CHECK( cuMemcpyDtoHAsync(s.h_out_rgb, s.d_out_rgb, bytes, 0) );
+    CU_CHECK( cuStreamSynchronize(0) );
+    std::memcpy(out_rgb, s.h_out_rgb, bytes);
 
     return 0;
 }
@@ -696,10 +702,10 @@ static int optix_ctx_render_bayer_raw16(void* handle, int spp, uint16_t* out_raw
         /*SBT*/ &s.sbt,
         /*w,h,d*/ s.width, s.height, 1) );
 
-    CU_CHECK( cuStreamSynchronize(0) );
-
     const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(uint16_t);
-    CU_CHECK( cuMemcpyDtoH(out_raw16, s.d_out_raw16, bytes) );
+    CU_CHECK( cuMemcpyDtoHAsync(s.h_out_raw16, s.d_out_raw16, bytes, 0) );
+    CU_CHECK( cuStreamSynchronize(0) );
+    std::memcpy(out_raw16, s.h_out_raw16, bytes);
 
     return 0;
 }
