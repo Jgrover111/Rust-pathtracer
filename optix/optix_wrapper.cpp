@@ -271,7 +271,7 @@ static void buildCornell(State& s)
   const float3 Du = make_float3(-1.0f, 2.0f,  1.0f);
 
   // floor (white)
-  addQuad(s.vertices, s.indices, A,B,C,D);
+  addQuad(s.vertices, s.indices, D,C,B,A);
   s.kd.push_back(white); s.kd.push_back(white);
   s.ke.push_back(black); s.ke.push_back(black);
 
@@ -322,8 +322,8 @@ static void buildCornell(State& s)
       s.kd.push_back(white); s.kd.push_back(white);
       s.ke.push_back(black); s.ke.push_back(black);
     };
-    addRect(p0,p1,p2,p3); // bottom
-    addRect(q0,q1,q2,q3); // top
+    addRect(p3,p2,p1,p0); // bottom
+    addRect(q3,q2,q1,q0); // top
     addRect(p0,p1,q1,q0);
     addRect(p1,p2,q2,q1);
     addRect(p2,p3,q3,q2);

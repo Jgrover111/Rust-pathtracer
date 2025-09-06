@@ -248,7 +248,7 @@ static __forceinline__ __device__ float3 sample_camera_dir(int x, int y)
   const uint3  dim = optixGetLaunchDimensions();
   const float  fx  = (float(x) + 0.5f) / float(dim.x);
   const float  fy  = (float(y) + 0.5f) / float(dim.y);
-  const float2 d   = make_float2(2.0f*fx - 1.0f, 2.0f*fy - 1.0f);
+  const float2 d   = make_float2(2.0f*fx - 1.0f, 1.0f - 2.0f*fy);
   return normalize3(params.cam_w + d.x * params.cam_u + d.y * params.cam_v);
 }
 
@@ -259,7 +259,7 @@ extern "C" __global__ void __raygen__rg()
   const int    y   = int(idx.y);
   const int    W   = params.width;
   const int    H   = params.height;
-  const int    dst = y * W + x;
+  const int    dst = (H - 1 - y) * W + x;
 
   // Trace radiance
   RadiancePRD prd;
