@@ -9,10 +9,8 @@ image = "0.25.6"
 anyhow = "1.0.99"
 png = "0.17"
 ravif = "0.12"
-avif-serialize = "0.8"
-avif-parse = "1.4"
 rgb = "0.8"
-imgref = "1.10"
+rav1e = { version = "0.8", default-features = false }
 
 [build-dependencies]
 cmake = "0.1.54"

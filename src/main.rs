@@ -1,9 +1,8 @@
 use std::time::Instant;
 use std::ffi::c_int;
 use std::fs::File;
-use std::io::Write;
-use avif_serialize::{Aviffy, constants::{ColorPrimaries, TransferCharacteristics, MatrixCoefficients}};
-use avif_parse::AvifData;
+use rav1e::prelude::PixelRange;
+use ravif::{BitDepth, Color, ColorPrimaries, TransferCharacteristics, MatrixCoefficients};
 
 // ---- FFI selection ----------------------------------------------------------
 // Default: plain CUDA kernels (what you have working now)
@@ -240,50 +239,61 @@ fn pq_oetf_from_nits(nits: f32) -> f32 {
 }
 
 fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32], exposure: f32, peak_nits: f32) {
-    let n = (w*h) as usize;
-    let mut rgb16: Vec<rgb::RGB<u16>> = Vec::with_capacity(n);
-    let depth: u8 = 10;
-    let max_value: u16 = (1u16 << depth) - 1;
-    for y in 0..h { for x in 0..w {
-        let i = idx(x,y,w)*3;
-        let a=[img_aces[i]*exposure, img_aces[i+1]*exposure, img_aces[i+2]*exposure];
-        let t=tonemap_aces(a);
-        let rec2020 = mul3(M_ACESCG_TO_REC2020, t);
-        let r = pq_oetf_from_nits(rec2020[0].max(0.0)*peak_nits);
-        let g = pq_oetf_from_nits(rec2020[1].max(0.0)*peak_nits);
-        let b = pq_oetf_from_nits(rec2020[2].max(0.0)*peak_nits);
-        let r16 = (r * max_value as f32 + 0.5) as u16;
-        let g16 = (g * max_value as f32 + 0.5) as u16;
-        let b16 = (b * max_value as f32 + 0.5) as u16;
-        rgb16.push(rgb::RGB{ r: r16, g: g16, b: b16 });
-    }}
-    let img = imgref::Img::new(rgb16.as_slice(), w as usize, h as usize);
+    let n = (w * h) as usize;
+    let mut rgb10: Vec<rgb::RGB<u16>> = Vec::with_capacity(n);
+    for y in 0..h {
+        for x in 0..w {
+            let i = idx(x, y, w) * 3;
+            let a = [
+                img_aces[i] * exposure,
+                img_aces[i + 1] * exposure,
+                img_aces[i + 2] * exposure,
+            ];
+            let t = tonemap_aces(a);
+            let rec2020 = mul3(M_ACESCG_TO_REC2020, t);
+            let r = pq_oetf_from_nits(rec2020[0].max(0.0) * peak_nits);
+            let g = pq_oetf_from_nits(rec2020[1].max(0.0) * peak_nits);
+            let b = pq_oetf_from_nits(rec2020[2].max(0.0) * peak_nits);
+            let r10 = (r * 1023.0 + 0.5) as u16;
+            let g10 = (g * 1023.0 + 0.5) as u16;
+            let b10 = (b * 1023.0 + 0.5) as u16;
+            rgb10.push(rgb::RGB { r: r10, g: g10, b: b10 });
+        }
+    }
+
+    const BT2020: [f32; 3] = [0.2627, 0.6780, 0.0593];
+    let planes = rgb10.iter().map(|&px| {
+        let r = px.r as f32;
+        let g = px.g as f32;
+        let b = px.b as f32;
+        let y = BT2020[0] * r + BT2020[1] * g + BT2020[2] * b;
+        let cb = (b - y) * (0.5 / (1.0 - BT2020[2])) + 512.0;
+        let cr = (r - y) * (0.5 / (1.0 - BT2020[0])) + 512.0;
+        [y.round() as u16, cb.round() as u16, cr.round() as u16]
+    });
+
     let enc = ravif::Encoder::new()
         .with_quality(90.0)
         .with_speed(6)
-        .with_bit_depth(BitDepth::Ten);
-    let avif = enc.encode_rgb(img).expect("avif encode");
+        .with_bit_depth(BitDepth::Ten)
+        .with_color(Color {
+            primaries: ColorPrimaries::BT2020,
+            transfer: TransferCharacteristics::SMPTE2084,
+            matrix: MatrixCoefficients::BT2020NCL,
+            full_range: true,
+        });
+    let avif = enc
+        .encode_raw_planes_10_bit(
+            w as usize,
+            h as usize,
+            planes,
+            None::<[_; 0]>,
+            PixelRange::Full,
+            MatrixCoefficients::BT2020NCL,
+        )
+        .expect("avif encode");
 
-    let mut cursor = &avif.avif_file[..];
-    let parsed = AvifData::from_reader(&mut cursor).expect("parse avif");
-    let md = parsed.primary_item_metadata().expect("av1 metadata");
-
-    let mut aviffy = Aviffy::new();
-    aviffy
-        .set_width(md.max_frame_width.get())
-        .set_height(md.max_frame_height.get())
-        .set_bit_depth(md.bit_depth)
-        .set_color_primaries(ColorPrimaries::Bt2020)
-        .set_transfer_characteristics(TransferCharacteristics::Smpte2084)
-        .set_matrix_coefficients(MatrixCoefficients::Bt2020Ncl)
-        .set_full_color_range(true);
-
-    let mut out = Vec::new();
-    aviffy
-        .write_slice(&mut out, &parsed.primary_item, parsed.alpha_item.as_deref())
-        .expect("serialize avif");
-    let mut f = File::create(path).unwrap();
-    f.write_all(&out).unwrap();
+    std::fs::write(path, &avif.avif_file).unwrap();
 }
 
 // ---- main -------------------------------------------------------------------
