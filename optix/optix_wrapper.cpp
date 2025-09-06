@@ -91,10 +91,25 @@ static OptixResult createModuleCompat(OptixDeviceContext ctx,
 template<typename T>
 static void upload(const std::vector<T>& h, CUdeviceptr& d)
 {
-  if (d) CU_CHECK(cuMemFree(d));
   size_t bytes = h.size() * sizeof(T);
-  if (bytes == 0) { d = 0; return; }
-  CU_CHECK(cuMemAlloc(&d, bytes));
+  if (bytes == 0) {
+    if (d) { CU_CHECK(cuMemFree(d)); d = 0; }
+    return;
+  }
+
+  if (d) {
+    CUdeviceptr base = 0;
+    size_t alloc_bytes = 0;
+    CU_CHECK(cuMemGetAddressRange(&base, &alloc_bytes, d));
+    if (bytes > alloc_bytes) {
+      CU_CHECK(cuMemFree(d));
+      d = 0;
+    }
+  }
+
+  if (!d) {
+    CU_CHECK(cuMemAlloc(&d, bytes));
+  }
   CU_CHECK(cuMemcpyHtoD(d, h.data(), bytes));
 }
 
@@ -721,6 +736,7 @@ void  optix_ctx_set_camera(void* handle,
 
 static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
 {
+    if (!out_rgb) return -1;
     // same pattern you use elsewhere: update Params on device, launch, copy back
     auto& s = *reinterpret_cast<State*>(handle);
 
@@ -741,13 +757,16 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
 
     // interleaved RGB float32
     const size_t bytes = size_t(s.width) * size_t(s.height) * 3 * sizeof(float);
-    CU_CHECK( cuMemcpyDtoHAsync(out_rgb, s.d_out_rgb, bytes, s.stream) );
+    // Host memory is typically not page-locked, so use synchronous copy
+    // to avoid CUDA_ERROR_INVALID_VALUE from cuMemcpyDtoHAsync.
+    CU_CHECK( cuMemcpyDtoH(out_rgb, s.d_out_rgb, bytes) );
 
     return 0;
 }
 
 static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
 {
+    if (!out_raw) return -1;
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
@@ -764,7 +783,8 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
         /*w,h,d*/ s.width, s.height, 1) );
 
     const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(float);
-    CU_CHECK( cuMemcpyDtoHAsync(out_raw, s.d_out_bayer, bytes, s.stream) );
+    // As above, perform a synchronous copy since the host buffer may not be pinned.
+    CU_CHECK( cuMemcpyDtoH(out_raw, s.d_out_bayer, bytes) );
 
     return 0;
 }
@@ -800,7 +820,6 @@ extern "C" __declspec(dllexport)
 int optix_render_bayer_f32(int w, int h, int spp, int pat, float* out_raw)
 {
     ensure_handle(w, h);
-    (void)spp; // currently unused
     optix_ctx_set_bayer(g_handle, pat);
     return optix_ctx_render_bayer_f32(g_handle, spp, out_raw);
 }
@@ -813,31 +832,27 @@ void optix_synchronize()
     }
 }
 
-// Pinned host allocations require an active CUDA context.  The high level
-// renderer may request memory before any OptiX state has been created, so we
-// lazily retain and set the primary context if none is current.
-static void ensure_cuda_context()
-{
-    CUcontext cur = nullptr;
-    CU_CHECK(cuCtxGetCurrent(&cur));
-    if (!cur) {
-        CUdevice dev = 0;
-        CU_CHECK(cuDeviceGet(&dev, 0));
-        CU_CHECK(cuDevicePrimaryCtxRetain(&cur, dev));
-        CU_CHECK(cuCtxSetCurrent(cur));
-    }
-}
+// Pinned host allocations need the CUDA primary context to remain active while
+// the memory is in use. Track a retained context and release it once the last
+// allocation has been freed.
+static CUcontext g_pinned_ctx = nullptr;
+static size_t    g_pinned_allocs = 0;
+
 extern "C" __declspec(dllexport)
 void* optix_alloc_host(size_t bytes)
 {
-    // Ensure the CUDA driver is initialized before allocating pinned memory.
-    // optix_alloc_host can be called before any context setup, so we call
-    // cuInit and make sure a context is current to avoid CUDA_ERROR_INVALID_CONTEXT.
     CU_CHECK(cuInit(0));
-    ensure_cuda_context();
+    if (!g_pinned_ctx) {
+        CUdevice dev = 0;
+        CU_CHECK(cuDeviceGet(&dev, 0));
+        CU_CHECK(cuDevicePrimaryCtxRetain(&g_pinned_ctx, dev));
+    }
 
+    CU_CHECK(cuCtxSetCurrent(g_pinned_ctx));
     void* ptr = nullptr;
     CU_CHECK(cuMemAllocHost(&ptr, bytes));
+    ++g_pinned_allocs;
+    CU_CHECK(cuCtxSetCurrent(nullptr));
     return ptr;
 }
 
@@ -845,8 +860,15 @@ extern "C" __declspec(dllexport)
 void optix_free_host(void* ptr)
 {
     if (ptr) {
-        ensure_cuda_context();
+        CU_CHECK(cuCtxSetCurrent(g_pinned_ctx));
         CU_CHECK(cuMemFreeHost(ptr));
+        CU_CHECK(cuCtxSetCurrent(nullptr));
+        if (--g_pinned_allocs == 0) {
+            CUdevice dev = 0;
+            CU_CHECK(cuDeviceGet(&dev, 0));
+            CU_CHECK(cuDevicePrimaryCtxRelease(dev));
+            g_pinned_ctx = nullptr;
+        }
     }
 }
 
