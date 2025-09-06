@@ -32,6 +32,7 @@ add_custom_command(
         -x cu -rdc=true
         --compile
         --generate-code=arch=compute_75,code=[compute_75,sm_75]
+        --use_fast_math
         -std=c++17
         -ptx
         "${CMAKE_CURRENT_SOURCE_DIR}/optix_device.cu"

@@ -399,14 +399,14 @@ static void createPipeline(State& s)
 //  #ifdef OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO
 //  mopts.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO;
 //  #endif
-  mopts.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+  mopts.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_3;
 //  mopts.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO;
 
   OptixPipelineCompileOptions popts {};
   popts.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
   popts.traversableGraphFlags  = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING |
                                  OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
-  popts.numPayloadValues       = 8;
+  popts.numPayloadValues       = 2;
   popts.numAttributeValues     = 2;
 //  popts.traversableGraphFlags = OPTIX_TRaversableGraphFlags(OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS |
 //                                                            OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING);
@@ -416,11 +416,11 @@ static void createPipeline(State& s)
   OptixPipelineLinkOptions link{};
   link.maxTraceDepth = 2;
   // On OptiX 9, link.debugLevel no longer exists.
-  #if defined(OPTIX_VERSION) && (OPTIX_VERSION < 90000)
-    #ifdef OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO
-      link.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO;
-    #endif
-  #endif
+//  #if defined(OPTIX_VERSION) && (OPTIX_VERSION < 90000)
+//    #ifdef OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO
+//      link.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO;
+//    #endif
+//  #endif
 
   auto ptxBytes = readFile(OPTIX_PTX_PATH);
   OTK_CHECK(createModuleCompat(s.ctx, &mopts, &popts,
@@ -473,9 +473,9 @@ static void createPipeline(State& s)
   // stack sizes
   OTK_CHECK(optixPipelineSetStackSize(
       s.pipeline,
-      /*directCallableStackSizeFromTraversal*/  2*1024,
-      /*directCallableStackSizeFromState*/      2*1024,
-      /*continuationStackSize*/                 2*1024,
+      /*directCallableStackSizeFromTraversal*/  1*1024,
+      /*directCallableStackSizeFromState*/      1*1024,
+      /*continuationStackSize*/                 1*1024,
       /*maxTraversableGraphDepth*/              2));
 
   // SBT
