@@ -134,12 +134,14 @@ static __forceinline__ __device__ T* unpackPtr() {
 
 struct PRD {
     float3 radiance;
+    float3 throughput;
+    float3 origin;
+    float3 direction;
+    unsigned int seed;
     int    depth;
     int    done;
 };
-struct RadiancePRD {
-  float3 radiance;
-};
+
 struct PRDShadow {
     int occluded;
 };
@@ -155,8 +157,9 @@ static __forceinline__ __device__ T* ptr_at(CUdeviceptr p) {
 
 extern "C" __global__ void __miss__ms_radiance()
 {
-  RadiancePRD* prd = unpackPtr<RadiancePRD>();
+  PRD* prd = unpackPtr<PRD>();
   prd->radiance = make3(0.0f);
+  prd->done = 1;
 }
 
 extern "C" __global__ void __miss__ms_shadow()
@@ -205,43 +208,65 @@ extern "C" __global__ void __closesthit__ch()
     const float3 kd = kd_arr[prim];
     const float3 ke = ke_arr[prim];
 
-    // Direct light
+    // Direct light from point light
     const float3 Lpos = params.light_pos;
     float3 L = Lpos - P;
     const float dist = fmaxf(length(L), 1e-3f);
     const float3 wi = L / dist;
 
-    // Shadow ray
-    PRDShadow sprd;
-    sprd.occluded = 0;
-    unsigned int u0, u1;
-    packPtr(&sprd, u0, u1);
-
+    PRDShadow sprd; sprd.occluded = 0;
+    unsigned int su0, su1; packPtr(&sprd, su0, su1);
     optixTrace(
         params.handle,
-        /*ray origin*/ P + Ng * 1e-3f,
-        /*ray dir*/    wi,
-        /*tmin*/       0.0f,
-        /*tmax*/       dist - 1e-3f,
-        /*time*/       0.0f,
-        /*visibility mask*/ 1,
-        /*ray flags*/  OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
-        /*SBT offsets*/
-        RAY_TYPE_SHADOW,      // SBT offset
-        RAY_TYPE_COUNT,       // SBT stride
-        RAY_TYPE_SHADOW,      // missSBTIndex
-        /*payload*/ u0, u1
-    );
+        P + Ng * 1e-3f,
+        wi,
+        0.0f,
+        dist - 1e-3f,
+        0.0f,
+        1,
+        OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
+        RAY_TYPE_SHADOW,
+        RAY_TYPE_COUNT,
+        RAY_TYPE_SHADOW,
+        su0, su1);
 
     const float visibility = sprd.occluded ? 0.0f : 1.0f;
     const float nDotL = fmaxf(0.0f, dot(Ng, wi));
-
     float3 Lo = kd * params.light_emit * (visibility * nDotL);
-    // add emission if you use it
-    Lo += ke;
 
-    prd.radiance = Lo;
-    prd.done = true;
+    // Accumulate emission and direct light
+    prd.radiance += ke + Lo;
+
+    // Sample diffuse direction (cosine-weighted)
+    unsigned int& seed = prd.seed;
+    float r1 = rnd(seed);
+    float r2 = rnd(seed);
+    const float phi = 2.0f * CUDART_PI_F * r1;
+    const float cosTheta = sqrtf(1.0f - r2);
+    const float sinTheta = sqrtf(r2);
+    float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+
+    float3 tangent = normalize(cross(Ng, fabsf(Ng.z) < 0.999f ? make_float3(0,0,1) : make_float3(1,0,0)));
+    float3 bitangent = cross(tangent, Ng);
+    float3 newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
+
+    prd.origin = P + Ng * 1e-3f;
+    prd.direction = newDir;
+    prd.throughput = mul(prd.throughput, kd);
+
+    prd.depth++;
+    if (prd.depth >= 5) {
+        prd.done = 1;
+        return;
+    }
+    if (prd.depth >= 3) {
+        float p = fmaxf(prd.throughput.x, fmaxf(prd.throughput.y, prd.throughput.z));
+        if (rnd(seed) > p) {
+            prd.done = 1;
+            return;
+        }
+        prd.throughput = prd.throughput / fmaxf(p, 1e-3f);
+    }
 }
 
 // --- Raygen program --------------------------------------------------------
@@ -275,28 +300,34 @@ extern "C" __global__ void __raygen__rg()
   unsigned int seed = params.frame * 9781u + dst * 6271u;
 
   for (int s = 0; s < params.spp; ++s) {
-    RadiancePRD prd;
+    PRD prd;
     prd.radiance = make3(0.0f);
-    unsigned int u0, u1;
-    packPtr(&prd, u0, u1);
+    prd.throughput = make3(1.0f);
+    prd.origin = org;
+    prd.direction = sample_camera_dir(x, y, make_float2(rnd(seed), rnd(seed)));
+    prd.depth = 0;
+    prd.done = 0;
+    prd.seed = seed;
 
-    float2 jitter = make_float2(rnd(seed), rnd(seed));
-    const float3 dir = sample_camera_dir(x, y, jitter);
+    while (!prd.done) {
+      prd.radiance = make3(0.0f);
+      float3 throughput = prd.throughput;
+      unsigned int u0, u1; packPtr(&prd, u0, u1);
+      optixTrace(
+        params.handle,
+        prd.origin,
+        prd.direction,
+        0.0f, 1e16f, 0.0f,
+        OptixVisibilityMask(1),
+        OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+        0,
+        2,
+        0,
+        u0, u1);
+      sum += prd.radiance * throughput;
+    }
 
-    optixTrace(
-      params.handle,
-      org, dir,
-      0.0f, 1e16f, 0.0f,
-      OptixVisibilityMask(1),
-      OPTIX_RAY_FLAG_DISABLE_ANYHIT, // anyhit only used by shadow ray
-      /* SBT record offsets: */
-      0,  // RAY_RADIANCE
-      2,  // RAY_TYPE_COUNT
-      0,  // missSBTIndex = RAY_RADIANCE
-      u0, u1
-    );
-
-    sum += prd.radiance;
+    seed = prd.seed;
   }
 
   const float3 rad = sum / float(params.spp);
