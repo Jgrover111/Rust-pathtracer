@@ -638,12 +638,13 @@ void  optix_ctx_set_camera(void* handle,
   CU_CHECK(cuMemcpyHtoD(s.d_params, &s.h_params, sizeof(Params)));
 }
 
-static int optix_ctx_render_rgb(void* handle, float* out_rgb)
+static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
 {
     // same pattern you use elsewhere: update Params on device, launch, copy back
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
+	s.h_params.spp = spp;
     // If your renderer needs any per-frame fields set, do it here.
     // e.g., s.h_params.bayer_pattern = s.bayer_pattern;   // (RGB path usually not needed)
 
@@ -666,11 +667,12 @@ static int optix_ctx_render_rgb(void* handle, float* out_rgb)
     return 0;
 }
 
-static int optix_ctx_render_bayer_raw16(void* handle, uint16_t* out_raw16)
+static int optix_ctx_render_bayer_raw16(void* handle, int spp, uint16_t* out_raw16)
 {
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
+	s.h_params.spp = spp;
     s.h_params.bayer_pattern = s.bayer_pattern;  // keep whatever you already store in s.bayer_pattern
     CU_CHECK( cuMemcpyHtoD(s.d_params, &s.h_params, sizeof(Params)) );
 
@@ -709,8 +711,7 @@ int optix_render_rgb(int w, int h, int spp, float* out_rgb)
             45.f);           // vfov degrees
     }
 
-    (void)spp; // currently unused by the device code
-    return optix_ctx_render_rgb(handle, out_rgb);
+    return optix_ctx_render_rgb(handle, spp, out_rgb);
 }
 
 extern "C" __declspec(dllexport)
@@ -733,7 +734,7 @@ int optix_render_bayer_raw16(int w, int h, int spp, int pat, uint16_t* out_raw16
 
     (void)spp; // currently unused
     optix_ctx_set_bayer(handle, pat);
-    return optix_ctx_render_bayer_raw16(handle, out_raw16);
+    return optix_ctx_render_bayer_raw16(handle, spp, out_raw16);
 }
 
 

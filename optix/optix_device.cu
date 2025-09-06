@@ -105,6 +105,14 @@ static __forceinline__ __device__ float3 normalize3(const float3& a) {
 static __forceinline__ __device__ float  clamp01(float x) {
   return fminf(fmaxf(x, 0.0f), 1.0f);
 }
+static __forceinline__ __device__ unsigned int lcg(unsigned int& state) {
+  state = state * 1664525u + 1013904223u;
+  return state;
+}
+
+static __forceinline__ __device__ float rnd(unsigned int& state) {
+  return float(lcg(state) & 0x00FFFFFFu) / float(0x01000000u);
+}
 
 // --- payload packing -------------------------------------------------------
 
@@ -243,11 +251,11 @@ static __forceinline__ __device__ uint16_t to_u16(float x) {
   return (uint16_t)(x * 65535.0f + 0.5f);
 }
 
-static __forceinline__ __device__ float3 sample_camera_dir(int x, int y)
+static __forceinline__ __device__ float3 sample_camera_dir(int x, int y, const float2& jitter)
 {
   const uint3  dim = optixGetLaunchDimensions();
-  const float  fx  = (float(x) + 0.5f) / float(dim.x);
-  const float  fy  = (float(y) + 0.5f) / float(dim.y);
+  const float  fx  = (float(x) + jitter.x) / float(dim.x);
+  const float  fy  = (float(y) + jitter.y) / float(dim.y);
   const float2 d   = make_float2(2.0f*fx - 1.0f, 1.0f - 2.0f*fy);
   return normalize3(params.cam_w + d.x * params.cam_u + d.y * params.cam_v);
 }
@@ -262,32 +270,41 @@ extern "C" __global__ void __raygen__rg()
   const int    dst = y * W + x;
 
   // Trace radiance
-  RadiancePRD prd;
-  prd.radiance = make3(0.0f);
-
-  unsigned int u0, u1;
-  packPtr(&prd, u0, u1);
-
   const float3 org = params.cam_eye;
-  const float3 dir = sample_camera_dir(x, y);
+  float3 sum = make3(0.0f);
+  unsigned int seed = params.frame * 9781u + dst * 6271u;
 
-  optixTrace(
-    params.handle,
-    org, dir,
-    0.0f, 1e16f, 0.0f,
-    OptixVisibilityMask(1),
-    OPTIX_RAY_FLAG_DISABLE_ANYHIT, // anyhit only used by shadow ray
-    /* SBT record offsets: */
-    0,  // RAY_RADIANCE
-    2,  // RAY_TYPE_COUNT
-    0,  // missSBTIndex = RAY_RADIANCE
-    u0, u1
-  );
+  for (int s = 0; s < params.spp; ++s) {
+    RadiancePRD prd;
+    prd.radiance = make3(0.0f);
+    unsigned int u0, u1;
+    packPtr(&prd, u0, u1);
+
+    float2 jitter = make_float2(rnd(seed), rnd(seed));
+    const float3 dir = sample_camera_dir(x, y, jitter);
+
+    optixTrace(
+      params.handle,
+      org, dir,
+      0.0f, 1e16f, 0.0f,
+      OptixVisibilityMask(1),
+      OPTIX_RAY_FLAG_DISABLE_ANYHIT, // anyhit only used by shadow ray
+      /* SBT record offsets: */
+      0,  // RAY_RADIANCE
+      2,  // RAY_TYPE_COUNT
+      0,  // missSBTIndex = RAY_RADIANCE
+      u0, u1
+    );
+
+    sum += prd.radiance;
+  }
+
+  const float3 rad = sum / float(params.spp);
 
   // Write outputs
   if (params.out_rgb) {
     float3* out = ptr_at<float3>(params.out_rgb);
-    out[dst] = prd.radiance;
+    out[dst] = rad;
   }
   if (params.out_raw16) {
     unsigned short* out = ptr_at<unsigned short>(params.out_raw16);
@@ -299,13 +316,13 @@ extern "C" __global__ void __raygen__rg()
 
     float val = 0.0f;
     if (pat == 0) {            // RGGB
-      val = (!xOdd && !yOdd) ? prd.radiance.x : (xOdd && yOdd) ? prd.radiance.z : prd.radiance.y;
+      val = (!xOdd && !yOdd) ? rad.x : (xOdd && yOdd) ? rad.z : rad.y;
     } else if (pat == 1) {     // BGGR
-      val = (!xOdd && !yOdd) ? prd.radiance.z : (xOdd && yOdd) ? prd.radiance.x : prd.radiance.y;
+      val = (!xOdd && !yOdd) ? rad.z : (xOdd && yOdd) ? rad.x : rad.y;
     } else if (pat == 2) {     // GRBG
-      val = (!xOdd && !yOdd) ? prd.radiance.y : (xOdd && yOdd) ? prd.radiance.y : (xOdd ? prd.radiance.x : prd.radiance.z);
+      val = (!xOdd && !yOdd) ? rad.y : (xOdd && yOdd) ? rad.y : (xOdd ? rad.x : rad.z);
     } else {                   // GBRG
-      val = (!xOdd && !yOdd) ? prd.radiance.y : (xOdd && yOdd) ? prd.radiance.y : (xOdd ? prd.radiance.z : prd.radiance.x);
+      val = (!xOdd && !yOdd) ? rad.y : (xOdd && yOdd) ? rad.y : (xOdd ? rad.z : rad.x);
     }
     out[dst] = to_u16(val);
   }
