@@ -184,7 +184,11 @@ struct State
   // SBT
   RaygenRecord         rg_rec {};
   std::array<MissRecord, RAY_TYPE_COUNT> ms_rec {};
-  std::array<HitgroupRecord> hg_rec {};
+  // Hitgroup records are per-triangle and therefore sized at runtime.
+  // Using std::vector here lets us resize the container to match the
+  // geometry without relying on a compile-time constant, something that
+  // std::array cannot provide.
+  std::vector<HitgroupRecord> hg_rec;
   OptixShaderBindingTable sbt {};
 
   CUdeviceptr d_sbt_rg = 0;
@@ -195,13 +199,17 @@ struct State
   std::vector<float3> vertices;
   std::vector<uint3>  indices;
   std::vector<float3> normals;
+  // Per-triangle diffuse/emissive colors used when building SBT records.
+  std::vector<float3> kd;
+  std::vector<float3> ke;
+  // Per-triangle SBT indices for associating primitives with records.
+  std::vector<uint32_t> sbt_index;
 
   // Geometry (device)
   CUdeviceptr d_vertices = 0;
   CUdeviceptr d_indices  = 0;
-  CUdeviceptr d_kd       = 0;
-  CUdeviceptr d_ke       = 0;
   CUdeviceptr d_normals  = 0;
+  CUdeviceptr d_sbt_index = 0;
 
   // GAS
   CUdeviceptr           d_gas   = 0;
@@ -228,6 +236,7 @@ struct State
 
     if (d_vertices)  cuMemFree(d_vertices);
     if (d_indices)   cuMemFree(d_indices);
+    if (d_sbt_index) cuMemFree(d_sbt_index);
     if (d_sbt_rg)    cuMemFree(d_sbt_rg);
     if (d_sbt_ms)    cuMemFree(d_sbt_ms);
     if (d_sbt_hg)    cuMemFree(d_sbt_hg);
@@ -262,7 +271,7 @@ static void addQuad(std::vector<float3>& V, std::vector<uint3>& I,
 
 static void buildCornell(State& s)
 {
-  s.vertices.clear(); s.indices.clear(); s.normals.clear(); s.kd.clear(); s.ke.clear();
+  s.vertices.clear(); s.indices.clear(); s.normals.clear(); s.kd.clear(); s.ke.clear(); s.sbt_index.clear();
 
   const float3 red   = make_float3(0.63f, 0.065f, 0.05f);
   const float3 green = make_float3(0.14f, 0.45f, 0.091f);
@@ -353,10 +362,17 @@ static void buildCornell(State& s)
     s.normals[i] = normalize3(cross3(ab, ac));
   }
 
+  // the SBT index buffer stores one base index per triangle;
+  // the ray type is selected via the `sbtOffset` parameter in optixTrace
+  s.sbt_index.resize(s.indices.size());
+  for (uint32_t i = 0; i < s.sbt_index.size(); ++i)
+    s.sbt_index[i] = i;
+
   // upload geometry arrays (materials stored in SBT)
   upload(s.vertices, s.d_vertices);
   upload(s.indices,  s.d_indices);
   upload(s.normals,  s.d_normals);
+  upload(s.sbt_index, s.d_sbt_index);
 }
 
 // ----- GAS -------------------------------------------------------------------
@@ -382,9 +398,15 @@ static void buildGAS(State& s)
   tri.triangleArray.numIndexTriplets    = numTriangles;
   tri.triangleArray.indexStrideInBytes  = sizeof(uint3);
 
-  unsigned int triangle_input_flags = OPTIX_GEOMETRY_FLAG_NONE; // radiance CH only; we have a separate shadow AH PG
-  tri.triangleArray.flags            = &triangle_input_flags;
-  tri.triangleArray.numSbtRecords    = s.h_params.num_triangles; // one SBT record per triangle
+  // Each SBT record needs a corresponding geometry flag entry. Since each
+  // triangle contributes one base record (ray type selection happens at trace
+  // time via `sbtOffset`), size the flags array to the primitive count.
+  std::vector<unsigned int> tri_flags(numTriangles, OPTIX_GEOMETRY_FLAG_NONE);
+  tri.triangleArray.flags         = tri_flags.data();
+  tri.triangleArray.numSbtRecords = numTriangles;
+  tri.triangleArray.sbtIndexOffsetBuffer        = s.d_sbt_index;
+  tri.triangleArray.sbtIndexOffsetSizeInBytes   = sizeof(uint32_t);
+  tri.triangleArray.sbtIndexOffsetStrideInBytes = sizeof(uint32_t);
 
   OptixAccelBuildOptions accel_opts {};
   accel_opts.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
@@ -520,7 +542,8 @@ static void createPipeline(State& s)
   OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_sh,  &s.ms_rec[RAY_SHADOW]) );
 
   const uint32_t num_tris = s.h_params.num_triangles;
-  s.hg_rec.resize(static_cast<size_t>(num_tris) * RAY_TYPE_COUNT);
+  const uint32_t total_records = num_tris * RAY_TYPE_COUNT;
+  s.hg_rec.assign(static_cast<size_t>(total_records), {});
   for (uint32_t i = 0; i < num_tris; ++i) {
     HitgroupRecord& rec_rad = s.hg_rec[i * RAY_TYPE_COUNT + RAY_RADIANCE];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_rad, &rec_rad));
@@ -535,7 +558,7 @@ static void createPipeline(State& s)
   CUdeviceptr d_rg=0, d_ms=0, d_hg=0;
   CU_CHECK(cuMemAlloc(&d_rg, sizeof(RaygenRecord)));
   CU_CHECK(cuMemAlloc(&d_ms, sizeof(MissRecord) * RAY_TYPE_COUNT));
-  CU_CHECK(cuMemAlloc(&d_hg, sizeof(HitgroupRecord) *  s.hg_rec.size()));
+  CU_CHECK(cuMemAlloc(&d_hg, sizeof(HitgroupRecord) * s.hg_rec.size()));
   CU_CHECK(cuMemcpyHtoD(d_rg, &s.rg_rec, sizeof(RaygenRecord)));
   CU_CHECK(cuMemcpyHtoD(d_ms, s.ms_rec.data(), sizeof(MissRecord) * RAY_TYPE_COUNT));
   CU_CHECK(cuMemcpyHtoD(d_hg, s.hg_rec.data(), sizeof(HitgroupRecord) * s.hg_rec.size()));
@@ -549,8 +572,8 @@ static void createPipeline(State& s)
   s.sbt.missRecordStrideInBytes     = sizeof(MissRecord);
   s.sbt.missRecordCount             = RAY_TYPE_COUNT;
   s.sbt.hitgroupRecordBase          = d_hg;
-  s.sbt.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord) * RAY_TYPE_COUNT;
-  s.sbt.hitgroupRecordCount         = num_tris;
+  s.sbt.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord);
+  s.sbt.hitgroupRecordCount         = total_records;
 }
 
 // ----- create/destroy --------------------------------------------------------
@@ -645,20 +668,6 @@ static void* g_handle = nullptr;
 static int g_last_w = 0;
 static int g_last_h = 0;
 
-static void ensure_handle(int w, int h)
-{
-    if (!g_handle || w != g_last_w || h != g_last_h) {
-        if (g_handle) optix_ctx_destroy(g_handle);
-        g_handle = optix_ctx_create(w, h);
-        g_last_w = w; g_last_h = h;
-        // Set a simple default camera once (tweak if you like)
-        optix_ctx_set_camera(g_handle,
-            0.f, 1.f, 3.f,
-            0.f, 1.f, 0.f,
-            0.f, 1.f, 0.f,
-            45.f);
-    }
-}
 extern "C" __declspec(dllexport)
 void* optix_ctx_create(int width, int height)
 {
@@ -760,10 +769,30 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
     return 0;
 }
 
+// Helper to lazily create/destroy the renderer state.  The OptiX context
+// has a number of expensive resources associated with it, so we keep it
+// around between calls and recreate it only if the render resolution
+// changes.  This function lives here so that the C API wrappers below can
+// use it without needing forward declarations of the exported symbols.
+static void ensure_handle(int w, int h)
+{
+    if (!g_handle || w != g_last_w || h != g_last_h) {
+        if (g_handle) optix_ctx_destroy(g_handle);
+        g_handle = optix_ctx_create(w, h);
+        g_last_w = w; g_last_h = h;
+        // Set a simple default camera once (tweak if you like)
+        optix_ctx_set_camera(g_handle,
+                             0.f, 1.f, 3.f,
+                             0.f, 1.f, 0.f,
+                             0.f, 1.f, 0.f,
+                             45.f);
+    }
+}
+
 extern "C" __declspec(dllexport)
 int optix_render_rgb(int w, int h, int spp, float* out_rgb)
 {
-        ensure_handle(w, h);
+    ensure_handle(w, h);
     return optix_ctx_render_rgb(g_handle, spp, out_rgb);
 }
 
@@ -783,9 +812,30 @@ void optix_synchronize()
         CU_CHECK(cuStreamSynchronize(s.stream));
     }
 }
+
+// Pinned host allocations require an active CUDA context.  The high level
+// renderer may request memory before any OptiX state has been created, so we
+// lazily retain and set the primary context if none is current.
+static void ensure_cuda_context()
+{
+    CUcontext cur = nullptr;
+    CU_CHECK(cuCtxGetCurrent(&cur));
+    if (!cur) {
+        CUdevice dev = 0;
+        CU_CHECK(cuDeviceGet(&dev, 0));
+        CU_CHECK(cuDevicePrimaryCtxRetain(&cur, dev));
+        CU_CHECK(cuCtxSetCurrent(cur));
+    }
+}
 extern "C" __declspec(dllexport)
 void* optix_alloc_host(size_t bytes)
 {
+    // Ensure the CUDA driver is initialized before allocating pinned memory.
+    // optix_alloc_host can be called before any context setup, so we call
+    // cuInit and make sure a context is current to avoid CUDA_ERROR_INVALID_CONTEXT.
+    CU_CHECK(cuInit(0));
+    ensure_cuda_context();
+
     void* ptr = nullptr;
     CU_CHECK(cuMemAllocHost(&ptr, bytes));
     return ptr;
@@ -794,7 +844,10 @@ void* optix_alloc_host(size_t bytes)
 extern "C" __declspec(dllexport)
 void optix_free_host(void* ptr)
 {
-    if (ptr) CU_CHECK(cuMemFreeHost(ptr));
+    if (ptr) {
+        ensure_cuda_context();
+        CU_CHECK(cuMemFreeHost(ptr));
+    }
 }
 
 
