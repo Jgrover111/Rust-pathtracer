@@ -260,7 +260,7 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 64;
+    let spp = 1024;
     let pattern = 0;
 
     let mut rgb = vec![0f32; (w*h*3) as usize];

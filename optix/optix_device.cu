@@ -298,6 +298,18 @@ static __forceinline__ __device__ float3 sample_camera_dir(int x, int y, const f
   return normalize3(params.cam_w + d.x * params.cam_u + d.y * params.cam_v);
 }
 
+static __forceinline__ __device__ int bayer_channel_for(int x, int y, int pattern)
+{
+  const int mx = x & 1;
+  const int my = y & 1;
+  switch(pattern){
+    case 0: return (my==0) ? (mx==0 ? 0:1) : (mx==0 ? 1:2);
+    case 1: return (my==0) ? (mx==0 ? 2:1) : (mx==0 ? 1:0);
+    case 2: return (my==0) ? (mx==0 ? 1:0) : (mx==0 ? 2:1);
+    default:return (my==0) ? (mx==0 ? 1:2) : (mx==0 ? 0:1);
+  }
+}
+
 extern "C" __global__ void __raygen__rg()
 {
   const uint3  idx = optixGetLaunchIndex();
@@ -309,7 +321,9 @@ extern "C" __global__ void __raygen__rg()
 
   // Trace radiance
   const float3 org = params.cam_eye;
-  float3 sum = make3(0.0f);
+  float3 sum_rgb = make3(0.0f);
+  float sum_raw = 0.0f;
+  const int ch = bayer_channel_for(x, y, params.bayer_pattern);
   unsigned int seed = params.frame * 9781u + dst * 6271u;
 
   for (int s = 0; s < params.spp; ++s) {
@@ -325,6 +339,7 @@ extern "C" __global__ void __raygen__rg()
     while (!prd.done) {
       prd.radiance = make3(0.0f);
       float3 throughput = prd.throughput;
+	  float throughput_ch = (ch==0 ? throughput.x : (ch==1 ? throughput.y : throughput.z));
       unsigned int u0, u1; packPtr(&prd, u0, u1);
       optixTrace(
         params.handle,
@@ -337,37 +352,24 @@ extern "C" __global__ void __raygen__rg()
         2,
         0,
         u0, u1);
-      sum += prd.radiance * throughput;
+      if (params.out_rgb)
+        sum_rgb += prd.radiance * throughput;
+      if (params.out_raw16)
+        sum_raw += (ch==0 ? prd.radiance.x : (ch==1 ? prd.radiance.y : prd.radiance.z)) * throughput_ch;
     }
 
     seed = prd.seed;
   }
 
-  const float3 rad = sum / float(params.spp);
-
   // Write outputs
   if (params.out_rgb) {
+	float3 rad = sum_rgb / float(params.spp);
     float3* out = ptr_at<float3>(params.out_rgb);
     out[dst] = rad;
   }
   if (params.out_raw16) {
+	float rad = sum_raw / float(params.spp);
     unsigned short* out = ptr_at<unsigned short>(params.out_raw16);
-
-    // Bayer mapping
-    const int pat = params.bayer_pattern; // 0:RGGB,1:BGGR,2:GRBG,3:GBRG
-    const bool xOdd = (x & 1) != 0;
-    const bool yOdd = (y & 1) != 0;
-
-    float val = 0.0f;
-    if (pat == 0) {            // RGGB
-      val = (!xOdd && !yOdd) ? rad.x : (xOdd && yOdd) ? rad.z : rad.y;
-    } else if (pat == 1) {     // BGGR
-      val = (!xOdd && !yOdd) ? rad.z : (xOdd && yOdd) ? rad.x : rad.y;
-    } else if (pat == 2) {     // GRBG
-      val = (!xOdd && !yOdd) ? rad.y : (xOdd && yOdd) ? rad.y : (xOdd ? rad.x : rad.z);
-    } else {                   // GBRG
-      val = (!xOdd && !yOdd) ? rad.y : (xOdd && yOdd) ? rad.y : (xOdd ? rad.z : rad.x);
-    }
-    out[dst] = to_u16(val);
+    out[dst] = to_u16(rad);
   }
 }

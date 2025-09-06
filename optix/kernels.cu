@@ -177,6 +177,82 @@ __device__ inline float3 radiance(Ray ray, Rng& rng, int max_depth){
     return Lsum;
 }
 
+__device__ inline float select(const float3& v, int ch){
+    return ch==0 ? v.x : (ch==1 ? v.y : v.z);
+}
+
+__device__ inline float direct_light_mis_scalar(const float3& p, const float3& n, float albedo, Rng& rng, int ch){
+    float u = ((randf(rng)*2.f) - 1.f) * C_LIGHT_HALF.x;
+    float v = ((randf(rng)*2.f) - 1.f) * C_LIGHT_HALF.y;
+    float3 lp = make_float3(C_LIGHT_POS.x + u, C_LIGHT_POS.y, C_LIGHT_POS.z + v);
+    float3 L = lp - p;
+    float dist2 = fmaxf(1e-6f, dot(L,L));
+    float3 wi = L * rsqrtf(dist2);
+    float cosS = fmaxf(0.f, dot(n, wi));
+    float cosL = fmaxf(0.f, wi.y);
+    if (cosS <= 0.f || cosL <= 0.f) return 0.f;
+    if (!visible_to_light(p + n*1e-3f, wi, sqrtf(dist2))) return 0.f;
+    float area = 4.f * C_LIGHT_HALF.x * C_LIGHT_HALF.y;
+    float pdf_light = dist2 / (cosL * area);
+    float pdf_bsdf  = cosS * (1.0f/(float)M_PI);
+    float w = pdf_light / (pdf_light + pdf_bsdf);
+    float f = albedo * (1.0f/(float)M_PI);
+    float Le = select(C_LIGHT_EMIT, ch);
+    return Le * (w * (dot(n, wi)) / pdf_light) * f;
+}
+
+__device__ inline float radiance_scalar(Ray ray, Rng& rng, int max_depth, int ch){
+    float Lsum = 0.0f;
+    float throughput = 1.0f;
+    float3 prev_n = f3(0,0,0);
+    float  prev_pdf_bsdf = 0.0f;
+    bool   have_prev_pdf = false;
+
+    for (int depth=0; depth<max_depth; ++depth){
+        float t; float3 n; int wall;
+        if (!hit_room(ray, t, n, wall)) break;
+        float3 p = ray.o + ray.d * t;
+
+        if (point_on_light(p)){
+            float Le = select(C_LIGHT_EMIT, ch);
+            if (have_prev_pdf){
+                float3 Lvec = p - ray.o;
+                float dist2 = fmaxf(1e-6f, dot(Lvec,Lvec));
+                float3 wi = Lvec * rsqrtf(dist2);
+                float cosL = fmaxf(0.f, wi.y);
+                float area = 4.f * C_LIGHT_HALF.x * C_LIGHT_HALF.y;
+                float pdf_light = dist2 / (cosL * area);
+                float w_bsdf = prev_pdf_bsdf / (prev_pdf_bsdf + pdf_light);
+                Lsum += throughput * Le * w_bsdf;
+            } else {
+                Lsum += throughput * Le;
+            }
+            break;
+        }
+
+        float albedo = select(wall_color(wall), ch);
+        Lsum += throughput * direct_light_mis_scalar(p, n, albedo, rng, ch);
+
+        float3 wi = cosine_sample(n, rng);
+        float cosS = fmaxf(0.f, dot(n, wi));
+        float pdf_bsdf = cosS * (1.0f/(float)M_PI);
+        throughput *= albedo;
+        have_prev_pdf = true;
+        prev_pdf_bsdf = pdf_bsdf;
+        prev_n = n;
+
+        if (depth >= 2){
+            float pcont = fminf(0.95f, fmaxf(0.05f, throughput));
+            if (randf(rng) > pcont) break;
+            throughput *= (1.0f / pcont);
+        }
+
+        ray.o = p + n * 1e-3f;
+        ray.d = wi;
+    }
+    return Lsum;
+}
+
 __global__ void k_render_rgb(int W,int H,int spp,float* out_rgb){
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
@@ -217,8 +293,7 @@ __global__ void k_render_bayer_raw16(int W,int H,int spp,int pattern,uint16_t* o
     float accum = 0.0f;
     for (int s=0; s<spp; ++s){
         Ray ray = make_camera_ray(x,y,W,H,rng);
-        float3 c = radiance(ray, rng, MAX_DEPTH);
-        float v = (ch==0 ? c.x : (ch==1 ? c.y : c.z));
+        float v = radiance_scalar(ray, rng, MAX_DEPTH, ch);
         accum += v;
     }
     float m = fminf(fmaxf(accum * (1.0f / (float)spp), 0.f), 1.f);
