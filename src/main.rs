@@ -1,7 +1,7 @@
 use std::time::Instant;
 use std::ffi::c_int;
 use std::fs::File;
-use rav1e::prelude::PixelRange;
+use rav1e::color::PixelRange;
 use ravif::{BitDepth, MatrixCoefficients};
 use avif_parse::read_avif;
 use avif_serialize::constants::{ColorPrimaries, TransferCharacteristics, MatrixCoefficients as SerializeMatrixCoefficients};
@@ -310,7 +310,7 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 32;
+    let spp = 1024;
     let pattern = 0;
 
     let mut rgb = vec![0f32; (w*h*3) as usize];

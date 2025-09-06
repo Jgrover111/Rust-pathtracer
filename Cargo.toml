@@ -5,9 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-image = "0.25.6"
-anyhow = "1.0.99"
-png = "0.17"
+png = "0.18"
 ravif = "0.12"
 rgb = "0.8"
 rav1e = { version = "0.8", default-features = false }
