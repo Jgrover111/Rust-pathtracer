@@ -414,7 +414,7 @@ static void createPipeline(State& s)
   popts.pipelineLaunchParamsVariableName = "params";
 
   OptixPipelineLinkOptions link{};
-  link.maxTraceDepth = 2;
+  link.maxTraceDepth = 2; // allow a secondary optixTrace for shadow rays
   // On OptiX 9, link.debugLevel no longer exists.
 //  #if defined(OPTIX_VERSION) && (OPTIX_VERSION < 90000)
 //    #ifdef OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO
@@ -464,18 +464,30 @@ static void createPipeline(State& s)
   std::array<OptixProgramGroup,5> groups = {
     s.pg_raygen, s.pg_miss_rad, s.pg_miss_sh, s.pg_hit_rad, s.pg_hit_sh
   };
+  OptixStackSizes stack_sizes{};
+  for (OptixProgramGroup pg : groups) {
+    // No external functions, so the pipeline handle is nullptr
+    OTK_CHECK(optixUtilAccumulateStackSizes(pg, &stack_sizes, nullptr));
+  }
+
+  unsigned int dcss_trav  = 0;
+  unsigned int dcss_state = 0;
+  unsigned int css        = 0;
+  OTK_CHECK(optixUtilComputeStackSizes(
+      &stack_sizes, link.maxTraceDepth,
+      /*maxCCDepth*/ 0, /*maxDCDepth*/ 0,
+      &dcss_trav, &dcss_state, &css));
 
   logSize = sizeof(log);
   OTK_CHECK( optixPipelineCreate(s.ctx, &popts, &link,
                                  groups.data(), (unsigned)groups.size(),
                                  log, &logSize, &s.pipeline) );
 
-  // stack sizes
   OTK_CHECK(optixPipelineSetStackSize(
       s.pipeline,
-      /*directCallableStackSizeFromTraversal*/  1*1024,
-      /*directCallableStackSizeFromState*/      1*1024,
-      /*continuationStackSize*/                 1*1024,
+      dcss_trav,
+      dcss_state,
+      css,
       /*maxTraversableGraphDepth*/              2));
 
   // SBT
