@@ -382,6 +382,8 @@ extern "C" __global__ void __raygen__rg()
   const float3 org = params.cam_eye;
   float3 sum_rgb = make3(0.0f);
   float sum_bayer = 0.0f;
+  const bool do_rgb   = params.out_rgb   != 0;
+  const bool do_bayer = params.out_bayer != 0;
   const int ch = bayer_channel_for(x, y, params.bayer_pattern);
   unsigned long long seed =
       ((unsigned long long)params.frame * 9781ULL) ^
@@ -403,8 +405,6 @@ extern "C" __global__ void __raygen__rg()
 
     while (!prd.done) {
       prd.radiance = make3(0.0f);
-      float3 throughput = prd.throughput;
-	  float throughput_ch = (ch==0 ? throughput.x : (ch==1 ? throughput.y : throughput.z));
       unsigned int u0, u1; packPtr(&prd, u0, u1);
       optixTrace(
         params.handle,
@@ -417,23 +417,25 @@ extern "C" __global__ void __raygen__rg()
         2,
         0,
         u0, u1);
-      if (params.out_rgb)
-        sum_rgb += prd.radiance * throughput;
-      if (params.out_bayer)
+      if (do_rgb)
+        sum_rgb += prd.radiance * prd.throughput;
+      if (do_bayer) {
+        float throughput_ch = (ch==0 ? prd.throughput.x : (ch==1 ? prd.throughput.y : prd.throughput.z));
         sum_bayer += (ch==0 ? prd.radiance.x : (ch==1 ? prd.radiance.y : prd.radiance.z)) * throughput_ch;
+	  }
     }
 
     seed = prd.seed;
   }
 
   // Write outputs
-  if (params.out_rgb) {
-		float3 rad = sum_rgb / float(params.spp);
+  if (do_rgb) {
+                float3 rad = sum_rgb / float(params.spp);
     float3* out = ptr_at<float3>(params.out_rgb);
     out[dst] = rad;
   }
-  if (params.out_bayer) {
-		float rad = fmaxf(sum_bayer / float(params.spp), 0.f);
+  if (do_bayer) {
+                float rad = fmaxf(sum_bayer / float(params.spp), 0.f);
     float* out = ptr_at<float>(params.out_bayer);
     out[dst] = rad;
   }

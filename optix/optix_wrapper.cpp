@@ -774,8 +774,10 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
-	s.h_params.spp = spp;
+        s.h_params.spp = spp;
     s.h_params.bayer_pattern = s.bayer_pattern;  // keep whatever you already store in s.bayer_pattern
+    CUdeviceptr saved_out_rgb = s.h_params.out_rgb;
+    s.h_params.out_rgb = 0;
     CU_CHECK( cuMemcpyHtoD(s.d_params, &s.h_params, sizeof(Params)) );
 
     OTK_CHECK( optixLaunch(
@@ -790,6 +792,7 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
     // As above, perform a synchronous copy since the host buffer may not be pinned.
     CU_CHECK( cuMemcpyDtoH(out_raw, s.d_out_bayer, bytes) );
 
+    s.h_params.out_rgb = saved_out_rgb;
     return 0;
 }
 
