@@ -125,6 +125,34 @@ static __forceinline__ __device__ float rnd(unsigned long long& state) {
   return float(pcg(state) >> 8) * (1.0f / float(0x01000000u));
 }
 
+// Generate spatiotemporal blue noise sample using an R2 sequence with a
+// per-pixel Cranley-Patterson rotation. The hash introduces a high frequency
+// offset so neighbouring pixels are decorrelated while preserving the low
+// discrepancy of the base sequence.
+static __forceinline__ __device__ unsigned int hash_u32(unsigned int x)
+{
+  x ^= x >> 17;
+  x *= 0xed5ad4bbU;
+  x ^= x >> 11;
+  x *= 0xac4c1b51U;
+  x ^= x >> 15;
+  x *= 0x31848babU;
+  x ^= x >> 14;
+  return x;
+}
+
+static __forceinline__ __device__ float2 blue_noise(int x, int y, int s, int frame)
+{
+  const float a1 = 1.0f / 1.32471795724474602596f;      // plastic constant
+  const float a2 = 1.0f / (1.32471795724474602596f * 1.32471795724474602596f);
+  unsigned int h = hash_u32(x * 1973u + y * 9277u + frame * 26699u);
+  float rx = (h & 0xffff) * (1.0f / 65536.0f);
+  float ry = ((h >> 16) & 0xffff) * (1.0f / 65536.0f);
+  float u = fmodf(rx + (s + 0.5f) * a1, 1.0f);
+  float v = fmodf(ry + (s + 0.5f) * a2, 1.0f);
+  return make_float2(u, v);
+}
+
 static __forceinline__ __device__ void make_onb(const float3& n, float3& t, float3& b)
 {
   if (n.z < -0.9999999f) {
@@ -365,7 +393,8 @@ extern "C" __global__ void __raygen__rg()
     prd.radiance = make3(0.0f);
     prd.throughput = make3(1.0f);
     prd.origin = org;
-    prd.direction = sample_camera_dir(x, y, make_float2(rnd(seed), rnd(seed)));
+    float2 jitter = blue_noise(x, y, s, params.frame);
+    prd.direction = sample_camera_dir(x, y, jitter);
     prd.depth = 0;
     prd.done = 0;
     prd.seed = seed;
