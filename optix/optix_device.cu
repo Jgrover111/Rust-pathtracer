@@ -256,14 +256,13 @@ extern "C" __global__ void __closesthit__ch()
                 RAY_TYPE_COUNT,
                 RAY_TYPE_SHADOW,
                 occluded);
-            occluded = optixGetPayload_0();
             if (!occluded) {
                 float area = 4.0f * params.light_half.x * params.light_half.y;
                 float pdf_light = dist2 / (cosL * area);
                 float pdf_bsdf = cosS * (1.0f / CUDART_PI_F);
                 float w = pdf_light / (pdf_light + pdf_bsdf);
                 float3 f = kd * (1.0f / CUDART_PI_F);
-                Lo = params.light_emit * f * (cosS / pdf_light) * w;
+                Lo += params.light_emit * f * (cosS / pdf_light) * w;
             }
         }
     }
