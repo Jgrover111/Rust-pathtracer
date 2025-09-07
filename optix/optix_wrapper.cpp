@@ -168,9 +168,10 @@ struct Params
   CUdeviceptr d_normals;  // float3*
   uint32_t    num_triangles;
 
-  // simple point light used in device
+  // simple rectangular area light used in device
   float3 light_pos;
   float3 light_emit;
+  float2 light_half;
 };
 
 using RaygenRecord  = SbtRecord<EmptyData>;
@@ -651,7 +652,8 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.d_indices  = st->d_indices;
   st->h_params.d_normals  = st->d_normals;
   st->h_params.light_pos  = make_float3(0.f, 1.99f, 0.f);
-  st->h_params.light_emit = make_float3(1.f, 1.f, 1.f); // device also uses emissive tris
+  st->h_params.light_emit = make_float3(15.f, 15.f, 15.f); // match emissive ceiling light
+  st->h_params.light_half = make_float2(0.3f, 0.3f);
 
   // pipeline
   createPipeline(*st);

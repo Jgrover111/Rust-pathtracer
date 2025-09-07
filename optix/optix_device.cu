@@ -28,9 +28,10 @@ struct Params
   CUdeviceptr              d_normals;    // float3*
   uint32_t                 num_triangles;
 
-  // Simple point light
+  // Rectangular area light centered at light_pos with half extents light_half
   float3                   light_pos;
   float3                   light_emit;
+  float2                   light_half;
 };
 
 extern "C" {
@@ -111,13 +112,16 @@ static __forceinline__ __device__ float3 normalize3(const float3& a) {
 static __forceinline__ __device__ float  clamp01(float x) {
   return fminf(fmaxf(x, 0.0f), 1.0f);
 }
-static __forceinline__ __device__ unsigned int lcg(unsigned int& state) {
-  state = state * 1664525u + 1013904223u;
-  return state;
+static __forceinline__ __device__ unsigned int pcg(unsigned long long& state) {
+  unsigned long long oldstate = state;
+  state = oldstate * 6364136223846793005ULL + 1442695040888963407ULL;
+  unsigned int xorshifted = ((oldstate >> 18u) ^ oldstate) >> 27u;
+  unsigned int rot = oldstate >> 59u;
+  return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
 }
 
-static __forceinline__ __device__ float rnd(unsigned int& state) {
-  return float(lcg(state) & 0x00FFFFFFu) / float(0x01000000u);
+static __forceinline__ __device__ float rnd(unsigned long long& state) {
+  return float(pcg(state) >> 8) * (1.0f / float(0x01000000u));
 }
 
 static __forceinline__ __device__ void make_onb(const float3& n, float3& t, float3& b)
@@ -156,7 +160,7 @@ struct PRD {
     float3 throughput;
     float3 origin;
     float3 direction;
-    unsigned int seed;
+    unsigned long long seed;
     int    depth;
     int    done;
 };
@@ -221,37 +225,48 @@ extern "C" __global__ void __closesthit__ch()
     const float3 kd = hg->kd;
     const float3 ke = hg->ke;
 
-    // Direct light from point light
-    const float3 Lpos = params.light_pos;
-    float3 L = Lpos - P;
-    const float dist = fmaxf(length(L), 1e-3f);
-    const float3 wi = L / dist;
-
-    unsigned int occluded = 0u;
-    optixTrace(
-        params.handle,
-        P + Ng * 1e-3f,
-        wi,
-        0.0f,
-        dist - 1e-3f,
-        0.0f,
-        1,
-        OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-        RAY_TYPE_SHADOW,
-        RAY_TYPE_COUNT,
-        RAY_TYPE_SHADOW,
-        occluded);
-
-    occluded = optixGetPayload_0();
-    const float visibility = occluded ? 0.0f : 1.0f;
-    const float nDotL = fmaxf(0.0f, dot(Ng, wi));
-    float3 Lo = kd * params.light_emit * (visibility * nDotL);
+    // Sample direct illumination from rectangular area light
+    unsigned long long& seed = prd.seed;
+    float3 Lo = make3(0.0f);
+    {
+        float u = (rnd(seed) * 2.0f - 1.0f) * params.light_half.x;
+        float v = (rnd(seed) * 2.0f - 1.0f) * params.light_half.y;
+        float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y, params.light_pos.z + v);
+        float3 L = lp - P;
+        float dist2 = fmaxf(dot(L, L), 1e-6f);
+        float dist = sqrtf(dist2);
+        float3 wi = L / dist;
+        float cosS = fmaxf(0.0f, dot(Ng, wi));
+        float cosL = fmaxf(0.0f, wi.y);
+        if (cosS > 0.0f && cosL > 0.0f) {
+            unsigned int occluded = 0u;
+            optixTrace(
+                params.handle,
+                P + Ng * 1e-3f,
+                wi,
+                0.0f,
+                dist - 1e-3f,
+                0.0f,
+                1,
+                OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                RAY_TYPE_SHADOW,
+                RAY_TYPE_COUNT,
+                RAY_TYPE_SHADOW,
+                occluded);
+            occluded = optixGetPayload_0();
+            if (!occluded) {
+                float area = 4.0f * params.light_half.x * params.light_half.y;
+                float pdf = dist2 / (cosL * area);
+                float3 f = kd * (1.0f / CUDART_PI_F);
+                Lo = params.light_emit * f * (cosS / pdf);
+            }
+        }
+    }
 
     // Accumulate emission and direct light
     prd.radiance += ke + Lo;
 
     // Sample diffuse direction (cosine-weighted)
-    unsigned int& seed = prd.seed;
     float r1 = rnd(seed);
     float r2 = rnd(seed);
     const float phi = 2.0f * CUDART_PI_F * r1;
@@ -319,7 +334,10 @@ extern "C" __global__ void __raygen__rg()
   float3 sum_rgb = make3(0.0f);
   float sum_bayer = 0.0f;
   const int ch = bayer_channel_for(x, y, params.bayer_pattern);
-  unsigned int seed = params.frame * 9781u + dst * 6271u;
+  unsigned long long seed =
+      ((unsigned long long)params.frame * 9781ULL) ^
+      ((unsigned long long)dst * 6271ULL) ^
+      0x853c49e6748fea9bULL;
 
   for (int s = 0; s < params.spp; ++s) {
     PRD prd;
