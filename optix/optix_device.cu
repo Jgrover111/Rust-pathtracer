@@ -163,6 +163,9 @@ struct PRD {
     unsigned long long seed;
     int    depth;
     int    done;
+    // MIS: previous bounce's BSDF pdf and validity flag
+    float  prev_pdf_bsdf;
+    int    prev_pdf_valid;
 };
 
 // --- access helpers for CUdeviceptr arrays --------------------------------
@@ -256,15 +259,27 @@ extern "C" __global__ void __closesthit__ch()
             occluded = optixGetPayload_0();
             if (!occluded) {
                 float area = 4.0f * params.light_half.x * params.light_half.y;
-                float pdf = dist2 / (cosL * area);
+                float pdf_light = dist2 / (cosL * area);
+                float pdf_bsdf = cosS * (1.0f / CUDART_PI_F);
+                float w = pdf_light / (pdf_light + pdf_bsdf);
                 float3 f = kd * (1.0f / CUDART_PI_F);
-                Lo = params.light_emit * f * (cosS / pdf);
+                Lo = params.light_emit * f * (cosS / pdf_light) * w;
             }
         }
     }
 
-    // Accumulate emission and direct light
-    prd.radiance += ke + Lo;
+    // Accumulate emission with MIS and direct light
+    float3 emission = ke;
+    if (prd.prev_pdf_valid && (ke.x > 0.0f || ke.y > 0.0f || ke.z > 0.0f)) {
+        float3 L = P - prd.origin;
+        float dist2 = fmaxf(dot(L, L), 1e-6f);
+        float area = 4.0f * params.light_half.x * params.light_half.y;
+        float cosL = fmaxf(0.0f, prd.direction.y);
+        float pdf_light = dist2 / (cosL * area);
+        float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
+        emission *= w_bsdf;
+    }
+    prd.radiance += emission + Lo;
 
     // Sample diffuse direction (cosine-weighted)
     float r1 = rnd(seed);
@@ -281,6 +296,8 @@ extern "C" __global__ void __closesthit__ch()
     prd.origin = P + Ng * 1e-3f;
     prd.direction = newDir;
     prd.throughput = mul(prd.throughput, kd);
+    prd.prev_pdf_bsdf = cosTheta * (1.0f / CUDART_PI_F);
+    prd.prev_pdf_valid = 1;
 
     prd.depth++;
     if (prd.depth >= 5) {
@@ -348,6 +365,8 @@ extern "C" __global__ void __raygen__rg()
     prd.depth = 0;
     prd.done = 0;
     prd.seed = seed;
+    prd.prev_pdf_bsdf = 0.0f;
+    prd.prev_pdf_valid = 0;
 
     while (!prd.done) {
       prd.radiance = make3(0.0f);
