@@ -31,6 +31,7 @@ struct Params
   // Rectangular area light centered at light_pos with half extents light_half
   float3                   light_pos;
   float3                   light_emit;
+  float3                   light_normal;
   float2                   light_half;
 };
 
@@ -239,8 +240,9 @@ extern "C" __global__ void __closesthit__ch()
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float dist = sqrtf(dist2);
         float3 wi = L / dist;
+        float3 light_n = make_float3(0.0f, -1.0f, 0.0f);
         float cosS = fmaxf(0.0f, dot(Ng, wi));
-        float cosL = fmaxf(0.0f, wi.y);
+        float cosL = fmaxf(0.0f, dot(params.light_normal, wi * -1.0f));
         if (cosS > 0.0f && cosL > 0.0f) {
             unsigned int occluded = 0u;
             optixTrace(
@@ -258,11 +260,13 @@ extern "C" __global__ void __closesthit__ch()
                 occluded);
             if (!occluded) {
                 float area = 4.0f * params.light_half.x * params.light_half.y;
-                float pdf_light = dist2 / (cosL * area);
+                float pdf_area = 1.0f / area;
+                float pdf_light = pdf_area * dist2 / cosL;
                 float pdf_bsdf = cosS * (1.0f / CUDART_PI_F);
                 float w = pdf_light / (pdf_light + pdf_bsdf);
                 float3 f = kd * (1.0f / CUDART_PI_F);
-                Lo += params.light_emit * f * (cosS / pdf_light) * w;
+                float3 contrib = params.light_emit * f * (cosS * cosL / dist2) / pdf_area;
+                Lo += contrib * w;
             }
         }
     }
@@ -273,7 +277,8 @@ extern "C" __global__ void __closesthit__ch()
         float3 L = P - prd.origin;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float area = 4.0f * params.light_half.x * params.light_half.y;
-        float cosL = fmaxf(0.0f, prd.direction.y);
+        float3 light_n = make_float3(0.0f, -1.0f, 0.0f);
+        float cosL = fmaxf(0.0f, dot(params.light_normal, prd.direction * -1.0f));
         float pdf_light = dist2 / (cosL * area);
         float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
         emission *= w_bsdf;
