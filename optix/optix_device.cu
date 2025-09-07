@@ -281,7 +281,7 @@ extern "C" __global__ void __closesthit__ch()
         float cosL = fmaxf(0.0f, dot(params.light_normal, prd.direction * -1.0f));
         float pdf_light = dist2 / (cosL * area);
         float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
-        emission *= w_bsdf;
+        emission = emission * w_bsdf;
     }
     prd.radiance += emission + Lo;
 
