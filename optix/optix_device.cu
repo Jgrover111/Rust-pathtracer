@@ -113,6 +113,10 @@ static __forceinline__ __device__ float3 normalize3(const float3& a) {
 static __forceinline__ __device__ float  clamp01(float x) {
   return fminf(fmaxf(x, 0.0f), 1.0f);
 }
+
+static __forceinline__ __device__ float select(const float3& v, int ch) {
+  return ch==0 ? v.x : (ch==1 ? v.y : v.z);
+}
 static __forceinline__ __device__ unsigned int pcg(unsigned long long& state) {
   unsigned long long oldstate = state;
   state = oldstate * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -197,6 +201,19 @@ struct PRD {
     int    prev_pdf_valid;
 };
 
+struct PRDScalar {
+    float  radiance;
+    float  throughput;
+    float3 origin;
+    float3 direction;
+    unsigned long long seed;
+    int    depth;
+    int    done;
+    float  prev_pdf_bsdf;
+    int    prev_pdf_valid;
+    int    ch;
+};
+
 // --- access helpers for CUdeviceptr arrays --------------------------------
 
 template<typename T>
@@ -210,6 +227,13 @@ extern "C" __global__ void __miss__ms_radiance()
 {
   PRD* prd = unpackPtr<PRD>();
   prd->radiance = make3(0.0f);
+  prd->done = 1;
+}
+
+extern "C" __global__ void __miss__ms_radiance_scalar()
+{
+  PRDScalar* prd = unpackPtr<PRDScalar>();
+  prd->radiance = 0.0f;
   prd->done = 1;
 }
 
@@ -346,6 +370,120 @@ extern "C" __global__ void __closesthit__ch()
     }
 }
 
+extern "C" __global__ void __closesthit__ch_bayer()
+{
+    PRDScalar& prd = *unpackPtr<PRDScalar>();
+
+    const unsigned int prim = optixGetPrimitiveIndex();
+
+    const uint3*  indices  = reinterpret_cast<const uint3*>(params.d_indices);
+    const float3* vertices = reinterpret_cast<const float3*>(params.d_vertices);
+    const uint3 tri = indices[prim];
+
+    const float3 v0 = vertices[tri.x];
+    const float3 v1 = vertices[tri.y];
+    const float3 v2 = vertices[tri.z];
+
+    const float2 bc = optixGetTriangleBarycentrics();
+    const float b1 = bc.x;
+    const float b2 = bc.y;
+    const float b0 = 1.0f - b1 - b2;
+
+    const float3 P  = v0 * b0 + v1 * b1 + v2 * b2;
+    const float3 Ng = normalize3(reinterpret_cast<const float3*>(params.d_normals)[prim]);
+
+    const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());
+    const float3 kd = hg->kd;
+    const float3 ke = hg->ke;
+
+    const int ch = prd.ch;
+    float albedo = select(kd, ch);
+    float emission = select(ke, ch);
+
+    unsigned long long& seed = prd.seed;
+    float Lo = 0.0f;
+    {
+        float u = (rnd(seed) * 2.0f - 1.0f) * params.light_half.x;
+        float v = (rnd(seed) * 2.0f - 1.0f) * params.light_half.y;
+        float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y, params.light_pos.z + v);
+        float3 L = lp - P;
+        float dist2 = fmaxf(dot(L, L), 1e-6f);
+        float dist = sqrtf(dist2);
+        float3 wi = L / dist;
+        float cosS = fmaxf(0.0f, dot(Ng, wi));
+        float cosL = fmaxf(0.0f, dot(params.light_normal, wi * -1.0f));
+        if (cosS > 0.0f && cosL > 0.0f) {
+            unsigned int occluded = 0u;
+            optixTrace(
+                params.handle,
+                P + Ng * 1e-3f,
+                wi,
+                0.0f,
+                dist - 1e-3f,
+                0.0f,
+                1,
+                OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                RAY_TYPE_SHADOW,
+                RAY_TYPE_COUNT,
+                RAY_TYPE_SHADOW,
+                occluded);
+            if (!occluded) {
+                float area = 4.0f * params.light_half.x * params.light_half.y;
+                float pdf_area = 1.0f / area;
+                float pdf_light = pdf_area * dist2 / cosL;
+                float pdf_bsdf = cosS * (1.0f / CUDART_PI_F);
+                float w = pdf_light / (pdf_light + pdf_bsdf);
+                float f = albedo * (1.0f / CUDART_PI_F);
+                float Le = select(params.light_emit, ch);
+                float contrib = Le * f * (cosS * cosL / dist2) / pdf_area;
+                Lo += contrib * w;
+            }
+        }
+    }
+
+    if (prd.prev_pdf_valid && emission > 0.0f) {
+        float3 L = P - prd.origin;
+        float dist2 = fmaxf(dot(L, L), 1e-6f);
+        float area = 4.0f * params.light_half.x * params.light_half.y;
+        float cosL = fmaxf(0.0f, dot(params.light_normal, prd.direction * -1.0f));
+        float pdf_light = dist2 / (cosL * area);
+        float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
+        emission *= w_bsdf;
+    }
+    prd.radiance += emission + Lo;
+
+    float r1 = rnd(seed);
+    float r2 = rnd(seed);
+    const float phi = 2.0f * CUDART_PI_F * r1;
+    const float cosTheta = sqrtf(1.0f - r2);
+    const float sinTheta = sqrtf(r2);
+    float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+
+    float3 tangent, bitangent;
+    make_onb(Ng, tangent, bitangent);
+    float3 newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
+
+    prd.origin = P + Ng * 1e-3f;
+    prd.direction = newDir;
+    prd.throughput *= albedo;
+    prd.prev_pdf_bsdf = cosTheta * (1.0f / CUDART_PI_F);
+    prd.prev_pdf_valid = 1;
+
+    prd.depth++;
+    if (prd.depth >= 5) {
+        prd.done = 1;
+        return;
+    }
+    if (prd.depth >= 3) {
+        float p = fminf(0.95f, fmaxf(0.05f, prd.throughput));
+        if (rnd(seed) > p) {
+            prd.done = 1;
+            return;
+        }
+        prd.throughput *= (1.0f / p);
+    }
+}
+
 // --- Raygen program --------------------------------------------------------
 
 static __forceinline__ __device__ float3 sample_camera_dir(int x, int y, const float2& jitter)
@@ -439,4 +577,60 @@ extern "C" __global__ void __raygen__rg()
     float* out = ptr_at<float>(params.out_bayer);
     out[dst] = rad;
   }
+}
+
+extern "C" __global__ void __raygen__bayer()
+{
+  const uint3  idx = optixGetLaunchIndex();
+  const int    x   = int(idx.x);
+  const int    y   = int(idx.y);
+  const int    W   = params.width;
+  const int    H   = params.height;
+  const int    dst = y * W + x;
+
+  const float3 org = params.cam_eye;
+  float sum = 0.0f;
+  const int ch = bayer_channel_for(x, y, params.bayer_pattern);
+  unsigned long long seed =
+      ((unsigned long long)params.frame * 9781ULL) ^
+      ((unsigned long long)dst * 6271ULL) ^
+      0x37c4d1e74c3fa19bULL;
+
+  for (int s = 0; s < params.spp; ++s) {
+    PRDScalar prd;
+    prd.radiance = 0.0f;
+    prd.throughput = 1.0f;
+    prd.origin = org;
+    float2 jitter = blue_noise(x, y, s, params.frame);
+    prd.direction = sample_camera_dir(x, y, jitter);
+    prd.depth = 0;
+    prd.done = 0;
+    prd.seed = seed;
+    prd.prev_pdf_bsdf = 0.0f;
+    prd.prev_pdf_valid = 0;
+    prd.ch = ch;
+
+    while (!prd.done) {
+      prd.radiance = 0.0f;
+      unsigned int u0, u1; packPtr(&prd, u0, u1);
+      optixTrace(
+        params.handle,
+        prd.origin,
+        prd.direction,
+        0.0f, 1e16f, 0.0f,
+        OptixVisibilityMask(1),
+        OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+        0,
+        2,
+        0,
+        u0, u1);
+      sum += prd.radiance * prd.throughput;
+    }
+
+    seed = prd.seed;
+  }
+
+  float rad = fmaxf(sum / float(params.spp), 0.f);
+  float* out = ptr_at<float>(params.out_bayer);
+  out[dst] = rad;
 }

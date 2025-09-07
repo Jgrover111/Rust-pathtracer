@@ -191,26 +191,36 @@ struct State
 
   // Pipeline
   OptixModule          module = nullptr;
-  OptixProgramGroup    pg_raygen  = nullptr;
-  OptixProgramGroup    pg_miss_rad= nullptr;
-  OptixProgramGroup    pg_miss_sh = nullptr;
-  OptixProgramGroup    pg_hit_rad = nullptr;
-  OptixProgramGroup    pg_hit_sh  = nullptr;
-  OptixPipeline        pipeline   = nullptr;
+  OptixProgramGroup    pg_raygen       = nullptr;
+  OptixProgramGroup    pg_raygen_bayer= nullptr;
+  OptixProgramGroup    pg_miss_rad     = nullptr;
+  OptixProgramGroup    pg_miss_rad_bayer = nullptr;
+  OptixProgramGroup    pg_miss_sh      = nullptr;
+  OptixProgramGroup    pg_hit_rad      = nullptr;
+  OptixProgramGroup    pg_hit_rad_bayer= nullptr;
+  OptixProgramGroup    pg_hit_sh       = nullptr;
+  OptixPipeline        pipeline        = nullptr;
 
   // SBT
-  RaygenRecord         rg_rec {};
-  std::array<MissRecord, RAY_TYPE_COUNT> ms_rec {};
+  RaygenRecord         rg_rec_rgb {};
+  RaygenRecord         rg_rec_bayer {};
+  std::array<MissRecord, RAY_TYPE_COUNT> ms_rec_rgb {};
+  std::array<MissRecord, RAY_TYPE_COUNT> ms_rec_bayer {};
   // Hitgroup records are per-triangle and therefore sized at runtime.
   // Using std::vector here lets us resize the container to match the
   // geometry without relying on a compile-time constant, something that
   // std::array cannot provide.
-  std::vector<HitgroupRecord> hg_rec;
-  OptixShaderBindingTable sbt {};
+  std::vector<HitgroupRecord> hg_rec_rgb;
+  std::vector<HitgroupRecord> hg_rec_bayer;
+  OptixShaderBindingTable sbt_rgb {};
+  OptixShaderBindingTable sbt_bayer {};
 
-  CUdeviceptr d_sbt_rg = 0;
-  CUdeviceptr d_sbt_ms = 0;
-  CUdeviceptr d_sbt_hg = 0;
+  CUdeviceptr d_sbt_rg_rgb = 0;
+  CUdeviceptr d_sbt_rg_bayer = 0;
+  CUdeviceptr d_sbt_ms_rgb = 0;
+  CUdeviceptr d_sbt_ms_bayer = 0;
+  CUdeviceptr d_sbt_hg_rgb = 0;
+  CUdeviceptr d_sbt_hg_bayer = 0;
 
   // Geometry (host)
   std::vector<float3> vertices;
@@ -253,19 +263,25 @@ struct State
 
     if (d_vertices)  cuMemFree(d_vertices);
     if (d_indices)   cuMemFree(d_indices);
-    if (d_sbt_index) cuMemFree(d_sbt_index);
-    if (d_sbt_rg)    cuMemFree(d_sbt_rg);
-    if (d_sbt_ms)    cuMemFree(d_sbt_ms);
-    if (d_sbt_hg)    cuMemFree(d_sbt_hg);
+    if (d_sbt_index)      cuMemFree(d_sbt_index);
+    if (d_sbt_rg_rgb)     cuMemFree(d_sbt_rg_rgb);
+    if (d_sbt_rg_bayer)   cuMemFree(d_sbt_rg_bayer);
+    if (d_sbt_ms_rgb)     cuMemFree(d_sbt_ms_rgb);
+    if (d_sbt_ms_bayer)   cuMemFree(d_sbt_ms_bayer);
+    if (d_sbt_hg_rgb)     cuMemFree(d_sbt_hg_rgb);
+    if (d_sbt_hg_bayer)   cuMemFree(d_sbt_hg_bayer);
     if (d_normals)   cuMemFree(d_normals);
     if (d_gas)       cuMemFree(d_gas);
 
     if (pipeline)    optixPipelineDestroy(pipeline);
-    if (pg_raygen)   optixProgramGroupDestroy(pg_raygen);
-    if (pg_miss_rad) optixProgramGroupDestroy(pg_miss_rad);
-    if (pg_miss_sh)  optixProgramGroupDestroy(pg_miss_sh);
-    if (pg_hit_rad)  optixProgramGroupDestroy(pg_hit_rad);
-    if (pg_hit_sh)   optixProgramGroupDestroy(pg_hit_sh);
+    if (pg_raygen)        optixProgramGroupDestroy(pg_raygen);
+    if (pg_raygen_bayer)  optixProgramGroupDestroy(pg_raygen_bayer);
+    if (pg_miss_rad)      optixProgramGroupDestroy(pg_miss_rad);
+    if (pg_miss_rad_bayer)optixProgramGroupDestroy(pg_miss_rad_bayer);
+    if (pg_miss_sh)       optixProgramGroupDestroy(pg_miss_sh);
+    if (pg_hit_rad)       optixProgramGroupDestroy(pg_hit_rad);
+    if (pg_hit_rad_bayer) optixProgramGroupDestroy(pg_hit_rad_bayer);
+    if (pg_hit_sh)        optixProgramGroupDestroy(pg_hit_sh);
     if (module)      optixModuleDestroy(module);
     if (ctx)         optixDeviceContextDestroy(ctx);
     if (cuCtx) {
@@ -496,11 +512,23 @@ static void createPipeline(State& s)
   logSize = sizeof(log);
   OTK_CHECK( optixProgramGroupCreate(s.ctx, &rgd, 1, &pg_opts, log, &logSize, &s.pg_raygen) );
 
+  OptixProgramGroupDesc rgd_b {}; rgd_b.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+  rgd_b.raygen.module            = s.module;
+  rgd_b.raygen.entryFunctionName = "__raygen__bayer";
+  logSize = sizeof(log);
+  OTK_CHECK( optixProgramGroupCreate(s.ctx, &rgd_b, 1, &pg_opts, log, &logSize, &s.pg_raygen_bayer) );
+
   OptixProgramGroupDesc md1 {}; md1.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
   md1.miss.module            = s.module;
   md1.miss.entryFunctionName = "__miss__ms_radiance";
   logSize = sizeof(log);
   OTK_CHECK( optixProgramGroupCreate(s.ctx, &md1, 1, &pg_opts, log, &logSize, &s.pg_miss_rad) );
+
+  OptixProgramGroupDesc md1b {}; md1b.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+  md1b.miss.module            = s.module;
+  md1b.miss.entryFunctionName = "__miss__ms_radiance_scalar";
+  logSize = sizeof(log);
+  OTK_CHECK( optixProgramGroupCreate(s.ctx, &md1b, 1, &pg_opts, log, &logSize, &s.pg_miss_rad_bayer) );
 
   OptixProgramGroupDesc md2 {}; md2.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
   md2.miss.module            = s.module;
@@ -515,6 +543,12 @@ static void createPipeline(State& s)
   logSize = sizeof(log);
   OTK_CHECK( optixProgramGroupCreate(s.ctx, &hgd1, 1, &pg_opts, log, &logSize, &s.pg_hit_rad) );
 
+  OptixProgramGroupDesc hgd1b {}; hgd1b.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+  hgd1b.hitgroup.moduleCH            = s.module;
+  hgd1b.hitgroup.entryFunctionNameCH = "__closesthit__ch_bayer";
+  logSize = sizeof(log);
+  OTK_CHECK( optixProgramGroupCreate(s.ctx, &hgd1b, 1, &pg_opts, log, &logSize, &s.pg_hit_rad_bayer) );
+
   OptixProgramGroupDesc hgd2 {}; hgd2.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
   // shadow ray uses only AH
   hgd2.hitgroup.moduleAH            = s.module;
@@ -522,8 +556,10 @@ static void createPipeline(State& s)
   logSize = sizeof(log);
   OTK_CHECK( optixProgramGroupCreate(s.ctx, &hgd2, 1, &pg_opts, log, &logSize, &s.pg_hit_sh) );
 
-  std::array<OptixProgramGroup,5> groups = {
-    s.pg_raygen, s.pg_miss_rad, s.pg_miss_sh, s.pg_hit_rad, s.pg_hit_sh
+  std::array<OptixProgramGroup,8> groups = {
+    s.pg_raygen, s.pg_raygen_bayer,
+    s.pg_miss_rad, s.pg_miss_rad_bayer, s.pg_miss_sh,
+    s.pg_hit_rad, s.pg_hit_rad_bayer, s.pg_hit_sh
   };
   OptixStackSizes stack_sizes{};
   for (OptixProgramGroup pg : groups) {
@@ -552,45 +588,78 @@ static void createPipeline(State& s)
       /*maxTraversableGraphDepth*/              2));
 
   // SBT
-  memset(&s.sbt, 0, sizeof(OptixShaderBindingTable));
+  memset(&s.sbt_rgb, 0, sizeof(OptixShaderBindingTable));
+  memset(&s.sbt_bayer, 0, sizeof(OptixShaderBindingTable));
 
-  OTK_CHECK( optixSbtRecordPackHeader(s.pg_raygen, &s.rg_rec) );
-  OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_rad, &s.ms_rec[RAY_RADIANCE]) );
-  OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_sh,  &s.ms_rec[RAY_SHADOW]) );
+  OTK_CHECK( optixSbtRecordPackHeader(s.pg_raygen, &s.rg_rec_rgb) );
+  OTK_CHECK( optixSbtRecordPackHeader(s.pg_raygen_bayer, &s.rg_rec_bayer) );
+  OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_rad, &s.ms_rec_rgb[RAY_RADIANCE]) );
+  OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_rad_bayer, &s.ms_rec_bayer[RAY_RADIANCE]) );
+  OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_sh, &s.ms_rec_rgb[RAY_SHADOW]) );
+  OTK_CHECK( optixSbtRecordPackHeader(s.pg_miss_sh, &s.ms_rec_bayer[RAY_SHADOW]) );
 
   const uint32_t num_tris = s.h_params.num_triangles;
   const uint32_t total_records = num_tris * RAY_TYPE_COUNT;
-  s.hg_rec.assign(static_cast<size_t>(total_records), {});
+  s.hg_rec_rgb.assign(static_cast<size_t>(total_records), {});
+  s.hg_rec_bayer.assign(static_cast<size_t>(total_records), {});
   for (uint32_t i = 0; i < num_tris; ++i) {
-    HitgroupRecord& rec_rad = s.hg_rec[i * RAY_TYPE_COUNT + RAY_RADIANCE];
+    HitgroupRecord& rec_rad = s.hg_rec_rgb[i * RAY_TYPE_COUNT + RAY_RADIANCE];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_rad, &rec_rad));
     rec_rad.data.kd = s.kd[i];
     rec_rad.data.ke = s.ke[i];
-    HitgroupRecord& rec_sh = s.hg_rec[i * RAY_TYPE_COUNT + RAY_SHADOW];
+    HitgroupRecord& rec_sh = s.hg_rec_rgb[i * RAY_TYPE_COUNT + RAY_SHADOW];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_sh, &rec_sh));
     rec_sh.data.kd = make_float3(0.f,0.f,0.f);
     rec_sh.data.ke = make_float3(0.f,0.f,0.f);
+
+    HitgroupRecord& rec_rad_b = s.hg_rec_bayer[i * RAY_TYPE_COUNT + RAY_RADIANCE];
+    OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_rad_bayer, &rec_rad_b));
+    rec_rad_b.data.kd = s.kd[i];
+    rec_rad_b.data.ke = s.ke[i];
+    HitgroupRecord& rec_sh_b = s.hg_rec_bayer[i * RAY_TYPE_COUNT + RAY_SHADOW];
+    OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_sh, &rec_sh_b));
+    rec_sh_b.data.kd = make_float3(0.f,0.f,0.f);
+    rec_sh_b.data.ke = make_float3(0.f,0.f,0.f);
   }
 
-  CUdeviceptr d_rg=0, d_ms=0, d_hg=0;
-  CU_CHECK(cuMemAlloc(&d_rg, sizeof(RaygenRecord)));
-  CU_CHECK(cuMemAlloc(&d_ms, sizeof(MissRecord) * RAY_TYPE_COUNT));
-  CU_CHECK(cuMemAlloc(&d_hg, sizeof(HitgroupRecord) * s.hg_rec.size()));
-  CU_CHECK(cuMemcpyHtoD(d_rg, &s.rg_rec, sizeof(RaygenRecord)));
-  CU_CHECK(cuMemcpyHtoD(d_ms, s.ms_rec.data(), sizeof(MissRecord) * RAY_TYPE_COUNT));
-  CU_CHECK(cuMemcpyHtoD(d_hg, s.hg_rec.data(), sizeof(HitgroupRecord) * s.hg_rec.size()));
+  CUdeviceptr d_rg_rgb=0, d_rg_bayer=0;
+  CUdeviceptr d_ms_rgb=0, d_ms_bayer=0;
+  CUdeviceptr d_hg_rgb=0, d_hg_bayer=0;
+  CU_CHECK(cuMemAlloc(&d_rg_rgb, sizeof(RaygenRecord)));
+  CU_CHECK(cuMemAlloc(&d_rg_bayer, sizeof(RaygenRecord)));
+  CU_CHECK(cuMemAlloc(&d_ms_rgb, sizeof(MissRecord) * RAY_TYPE_COUNT));
+  CU_CHECK(cuMemAlloc(&d_ms_bayer, sizeof(MissRecord) * RAY_TYPE_COUNT));
+  CU_CHECK(cuMemAlloc(&d_hg_rgb, sizeof(HitgroupRecord) * s.hg_rec_rgb.size()));
+  CU_CHECK(cuMemAlloc(&d_hg_bayer, sizeof(HitgroupRecord) * s.hg_rec_bayer.size()));
+  CU_CHECK(cuMemcpyHtoD(d_rg_rgb, &s.rg_rec_rgb, sizeof(RaygenRecord)));
+  CU_CHECK(cuMemcpyHtoD(d_rg_bayer, &s.rg_rec_bayer, sizeof(RaygenRecord)));
+  CU_CHECK(cuMemcpyHtoD(d_ms_rgb, s.ms_rec_rgb.data(), sizeof(MissRecord) * RAY_TYPE_COUNT));
+  CU_CHECK(cuMemcpyHtoD(d_ms_bayer, s.ms_rec_bayer.data(), sizeof(MissRecord) * RAY_TYPE_COUNT));
+  CU_CHECK(cuMemcpyHtoD(d_hg_rgb, s.hg_rec_rgb.data(), sizeof(HitgroupRecord) * s.hg_rec_rgb.size()));
+  CU_CHECK(cuMemcpyHtoD(d_hg_bayer, s.hg_rec_bayer.data(), sizeof(HitgroupRecord) * s.hg_rec_bayer.size()));
 
-  s.d_sbt_rg = d_rg;
-  s.d_sbt_ms = d_ms;
-  s.d_sbt_hg = d_hg;
+  s.d_sbt_rg_rgb = d_rg_rgb;
+  s.d_sbt_rg_bayer = d_rg_bayer;
+  s.d_sbt_ms_rgb = d_ms_rgb;
+  s.d_sbt_ms_bayer = d_ms_bayer;
+  s.d_sbt_hg_rgb = d_hg_rgb;
+  s.d_sbt_hg_bayer = d_hg_bayer;
 
-  s.sbt.raygenRecord                = d_rg;
-  s.sbt.missRecordBase              = d_ms;
-  s.sbt.missRecordStrideInBytes     = sizeof(MissRecord);
-  s.sbt.missRecordCount             = RAY_TYPE_COUNT;
-  s.sbt.hitgroupRecordBase          = d_hg;
-  s.sbt.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord);
-  s.sbt.hitgroupRecordCount         = total_records;
+  s.sbt_rgb.raygenRecord                = d_rg_rgb;
+  s.sbt_rgb.missRecordBase              = d_ms_rgb;
+  s.sbt_rgb.missRecordStrideInBytes     = sizeof(MissRecord);
+  s.sbt_rgb.missRecordCount             = RAY_TYPE_COUNT;
+  s.sbt_rgb.hitgroupRecordBase          = d_hg_rgb;
+  s.sbt_rgb.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord);
+  s.sbt_rgb.hitgroupRecordCount         = total_records;
+
+  s.sbt_bayer.raygenRecord                = d_rg_bayer;
+  s.sbt_bayer.missRecordBase              = d_ms_bayer;
+  s.sbt_bayer.missRecordStrideInBytes     = sizeof(MissRecord);
+  s.sbt_bayer.missRecordCount             = RAY_TYPE_COUNT;
+  s.sbt_bayer.hitgroupRecordBase          = d_hg_bayer;
+  s.sbt_bayer.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord);
+  s.sbt_bayer.hitgroupRecordCount         = total_records;
 }
 
 // ----- create/destroy --------------------------------------------------------
@@ -756,7 +825,7 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
         /*stream*/ s.stream,
         /*params*/ s.d_params,
         /*paramsSize*/ sizeof(Params),
-        /*SBT*/ &s.sbt,
+        /*SBT*/ &s.sbt_rgb,
         /*w,h,d*/ s.width, s.height, 1) );
 
     // interleaved RGB float32
@@ -785,7 +854,7 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
         /*stream*/ s.stream,
         /*params*/ s.d_params,
         /*paramsSize*/ sizeof(Params),
-        /*SBT*/ &s.sbt,
+        /*SBT*/ &s.sbt_bayer,
         /*w,h,d*/ s.width, s.height, 1) );
 
     const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(float);
