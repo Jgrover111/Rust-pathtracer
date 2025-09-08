@@ -583,7 +583,7 @@ fn main() {
 
     let t2 = Instant::now();
     let demosaiced = demosaic(&bayer, w, h, pattern);
-    let t_demosaic = t2.elapsed();    let mut l2 = Vec::with_capacity((w * h) as usize);
+    let t_demosaic = t2.elapsed();
     let mut l2 = Vec::with_capacity((w * h) as usize);
     for i in 0..(w * h) as usize {
         let r = demosaiced[i * 3];
