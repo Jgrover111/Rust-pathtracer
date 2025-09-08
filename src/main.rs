@@ -563,12 +563,12 @@ fn main() {
     let t1 = Instant::now();
     assert_eq!(ffi_render_bayer_f32(w, h, spp, pattern, bayer_ptr), 0);
     let t_raw = t1.elapsed();
+    let mut lums = Vec::with_capacity((w * h) as usize);
 
+    // Synchronize only when the CPU needs to read the GPU output
     unsafe {
         ffi_stream_sync();
     }
-
-    let mut lums = Vec::with_capacity((w * h) as usize);
     for i in 0..(w * h) as usize {
         let r = rgb[i * 3];
         let g = rgb[i * 3 + 1];
