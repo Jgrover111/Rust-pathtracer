@@ -252,14 +252,18 @@ struct State
   CUdeviceptr           d_out_bayer = 0; // float*
   uint32_t              width=0, height=0;
   CUstream              stream = nullptr;
+  CUstream              copy_stream = nullptr;
 
   // options
   int                   bayer_pattern = 0;
 
   ~State() {
+    if (stream)      CU_CHECK(cuStreamSynchronize(stream));
+    if (copy_stream) CU_CHECK(cuStreamSynchronize(copy_stream));
     if (d_out_rgb)   cuMemFree(d_out_rgb);
     if (d_out_bayer) cuMemFree(d_out_bayer);
     if (d_params)    cuMemFree(d_params);
+    if (copy_stream) cuStreamDestroy(copy_stream);
     if (stream)      cuStreamDestroy(stream);
 
     // h_params is registered as pinned host memory for async transfers.
@@ -741,6 +745,7 @@ static State* make_state(uint32_t W, uint32_t H)
   CU_CHECK(cuMemAlloc(&st->d_out_rgb,   rgbBytes));
   CU_CHECK(cuMemAlloc(&st->d_out_bayer, bayerBytes));
   CU_CHECK(cuStreamCreate(&st->stream, CU_STREAM_NON_BLOCKING));
+  CU_CHECK(cuStreamCreate(&st->copy_stream, CU_STREAM_NON_BLOCKING));
 
   st->h_params.out_rgb   = st->d_out_rgb;
   st->h_params.out_bayer = st->d_out_bayer;
@@ -822,11 +827,16 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
-	s.h_params.spp = spp;
+        s.h_params.spp = spp;
     // If your renderer needs any per-frame fields set, do it here.
     // e.g., s.h_params.bayer_pattern = s.bayer_pattern;   // (RGB path usually not needed)
 
     CU_CHECK( cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream) );
+
+    CUevent done = nullptr;
+    CUevent copy_done = nullptr;
+    CU_CHECK(cuEventCreate(&done, CU_EVENT_DEFAULT));
+    CU_CHECK(cuEventCreate(&copy_done, CU_EVENT_DEFAULT));
 
     OTK_CHECK( optixLaunch(
         s.pipeline,
@@ -836,10 +846,19 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
         /*SBT*/ &s.sbt_rgb,
         /*w,h,d*/ s.width, s.height, 1) );
 
+    CU_CHECK(cuEventRecord(done, s.stream));
+    CU_CHECK(cuStreamWaitEvent(s.copy_stream, done, 0));
+
     // interleaved RGB float32
     const size_t bytes = size_t(s.width) * size_t(s.height) * 3 * sizeof(float);
     // out_rgb must point to page-locked memory (allocated via optix_alloc_host)
-    CU_CHECK( cuMemcpyDtoHAsync(out_rgb, s.d_out_rgb, bytes, s.stream) );
+    CU_CHECK( cuMemcpyDtoHAsync(out_rgb, s.d_out_rgb, bytes, s.copy_stream) );
+
+    CU_CHECK(cuEventRecord(copy_done, s.copy_stream));
+    CU_CHECK(cuStreamWaitEvent(s.stream, copy_done, 0));
+
+    CU_CHECK(cuEventDestroy(copy_done));
+    CU_CHECK(cuEventDestroy(done));
 
     return 0;
 }
@@ -856,6 +875,11 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
     // Disable RGB output for this launch by zeroing the device-side pointer.
     CU_CHECK( cuMemsetD8Async(s.d_params + offsetof(Params, out_rgb), 0, sizeof(CUdeviceptr), s.stream) );
 
+    CUevent done = nullptr;
+    CUevent copy_done = nullptr;
+    CU_CHECK(cuEventCreate(&done, CU_EVENT_DEFAULT));
+    CU_CHECK(cuEventCreate(&copy_done, CU_EVENT_DEFAULT));
+
     OTK_CHECK( optixLaunch(
         s.pipeline,
         /*stream*/ s.stream,
@@ -864,9 +888,18 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
         /*SBT*/ &s.sbt_bayer,
         /*w,h,d*/ s.width, s.height, 1) );
 
+    CU_CHECK(cuEventRecord(done, s.stream));
+    CU_CHECK(cuStreamWaitEvent(s.copy_stream, done, 0));
+
     const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(float);
     // As above, perform an async copy to the page-locked host buffer.
-    CU_CHECK( cuMemcpyDtoHAsync(out_raw, s.d_out_bayer, bytes, s.stream) );
+    CU_CHECK( cuMemcpyDtoHAsync(out_raw, s.d_out_bayer, bytes, s.copy_stream) );
+
+    CU_CHECK(cuEventRecord(copy_done, s.copy_stream));
+    CU_CHECK(cuStreamWaitEvent(s.stream, copy_done, 0));
+
+    CU_CHECK(cuEventDestroy(copy_done));
+    CU_CHECK(cuEventDestroy(done));
 
     return 0;
 }
@@ -911,6 +944,7 @@ void optix_synchronize()
     if (g_handle) {
         auto& s = *reinterpret_cast<State*>(g_handle);
         CU_CHECK(cuStreamSynchronize(s.stream));
+        CU_CHECK(cuStreamSynchronize(s.copy_stream));
     }
 }
 
