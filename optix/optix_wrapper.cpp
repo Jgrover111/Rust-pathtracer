@@ -31,6 +31,20 @@
 #  error "OPTIX_PTX_PATH not defined (set by CMake)."
 #endif
 
+// Build-time tunables (defaults can be overridden via CMake options).
+#ifndef OPTIX_MAX_REG_COUNT
+#define OPTIX_MAX_REG_COUNT 0
+#endif
+#ifndef OPTIX_LAUNCH_BLOCK_SIZE
+#define OPTIX_LAUNCH_BLOCK_SIZE 0
+#endif
+#ifndef OPTIX_STACK_SIZE_SCALE
+#define OPTIX_STACK_SIZE_SCALE 1.0f
+#endif
+
+// CUDA kernels used for occupancy queries.
+void k_render_rgb(int W,int H,int spp,float* out_rgb);
+
 // ----- tiny helpers ---------------------------------------------------------
 #define OTK_CHECK(call)                                                          \
   do {                                                                           \
@@ -256,6 +270,7 @@ struct State
 
   // options
   int                   bayer_pattern = 0;
+  int                   launch_block_size = 0; // occupancy derived block size
 
   ~State() {
     if (stream)      CU_CHECK(cuStreamSynchronize(stream));
@@ -478,7 +493,8 @@ static void createPipeline(State& s)
   char log[8192]; size_t logSize = sizeof(log);
 
   OptixModuleCompileOptions mopts{};
-  mopts.maxRegisterCount = 0;
+  // Allow capping registers per thread (0 uses compiler default).
+  mopts.maxRegisterCount = OPTIX_MAX_REG_COUNT;
 //  #ifdef OPTIX_COMPILE_OPTIMIZATION_LEVEL_DEFAULT
 //  mopts.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_DEFAULT;
 //  #endif
@@ -512,6 +528,15 @@ static void createPipeline(State& s)
   OTK_CHECK(createModuleCompat(s.ctx, &mopts, &popts,
                                ptxBytes.data(), ptxBytes.size(),
                                log, &logSize, &s.module));
+
+  // Derive a reasonable CUDA launch block size using occupancy if requested.
+  int minGrid = 0, optBlock = 0;
+  if (cudaOccupancyMaxPotentialBlockSize(&minGrid, &optBlock,
+                                        k_render_rgb, 0, 0) == cudaSuccess) {
+    s.launch_block_size = OPTIX_LAUNCH_BLOCK_SIZE > 0 ? OPTIX_LAUNCH_BLOCK_SIZE : optBlock;
+  } else {
+    s.launch_block_size = OPTIX_LAUNCH_BLOCK_SIZE;
+  }
 
   OptixProgramGroupOptions pg_opts {};
 
@@ -570,31 +595,43 @@ static void createPipeline(State& s)
     s.pg_miss_rad, s.pg_miss_rad_bayer, s.pg_miss_sh,
     s.pg_hit_rad, s.pg_hit_rad_bayer, s.pg_hit_sh
   };
-  OptixStackSizes stack_sizes{};
-  for (OptixProgramGroup pg : groups) {
-    // No external functions, so the pipeline handle is nullptr
-    OTK_CHECK(optixUtilAccumulateStackSizes(pg, &stack_sizes, nullptr));
-  }
-
-  unsigned int dcss_trav  = 0;
-  unsigned int dcss_state = 0;
-  unsigned int css        = 0;
-  OTK_CHECK(optixUtilComputeStackSizes(
-      &stack_sizes, link.maxTraceDepth,
-      /*maxCCDepth*/ 0, /*maxDCDepth*/ 0,
-      &dcss_trav, &dcss_state, &css));
 
   logSize = sizeof(log);
   OTK_CHECK( optixPipelineCreate(s.ctx, &popts, &link,
                                  groups.data(), (unsigned)groups.size(),
                                  log, &logSize, &s.pipeline) );
 
+  unsigned int dcss_trav  = 0;
+  unsigned int dcss_state = 0;
+  unsigned int css        = 0;
+#if defined(OPTIX_STACK_SIZE_API_VERSION) && (OPTIX_STACK_SIZE_API_VERSION >= 2)
+  // Newer OptiX SDKs expose a convenience helper that estimates the stack
+  // requirements directly from a pipeline handle.
+  OTK_CHECK(optixUtilEstimateStackSize(
+      s.pipeline, link.maxTraceDepth,
+      /*maxCCDepth*/ 0, /*maxDCDepth*/ 0,
+      &dcss_trav, &dcss_state, &css));
+#else
+  // For older SDKs, accumulate stack sizes for each program group and compute
+  // the overall requirements manually.
+  OptixStackSizes stack_sizes{};
+  for (OptixProgramGroup pg : groups)
+    OTK_CHECK(optixUtilAccumulateStackSizes(pg, &stack_sizes, nullptr));
+  OTK_CHECK(optixUtilComputeStackSizes(
+      &stack_sizes, link.maxTraceDepth,
+      /*maxCCDepth*/ 0, /*maxDCDepth*/ 0,
+      &dcss_trav, &dcss_state, &css));
+#endif
+  dcss_trav  = static_cast<unsigned int>(dcss_trav  * OPTIX_STACK_SIZE_SCALE);
+  dcss_state = static_cast<unsigned int>(dcss_state * OPTIX_STACK_SIZE_SCALE);
+  css        = static_cast<unsigned int>(css        * OPTIX_STACK_SIZE_SCALE);
+
   OTK_CHECK(optixPipelineSetStackSize(
       s.pipeline,
       dcss_trav,
       dcss_state,
       css,
-      /*maxTraversableGraphDepth*/              2));
+      /*maxTraversableGraphDepth*/ 2));
 
   // SBT
   memset(&s.sbt_rgb, 0, sizeof(OptixShaderBindingTable));

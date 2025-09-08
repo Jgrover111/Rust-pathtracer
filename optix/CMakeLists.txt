@@ -5,6 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0")
 
+# Expose tunables for register usage, launch configuration and stack sizing.
+# Use CACHE STRING so the values are passed verbatim instead of "ON"/"OFF".
+set(OPTIX_MAX_REG_COUNT 0 CACHE STRING
+    "Limit registers per thread for OptiX programs (0 = compiler default)")
+set(OPTIX_LAUNCH_BLOCK_SIZE 0 CACHE STRING
+    "Override CUDA launch block size (0 = occupancy derived)")
+set(OPTIX_STACK_SIZE_SCALE 1.0 CACHE STRING
+    "Multiplier applied to estimated OptiX stack sizes")
+
 # ---- CUDA ----
 find_package(CUDAToolkit REQUIRED)
 
@@ -65,7 +74,13 @@ target_include_directories(optix_wrapper
 )
 
 # Avoid Windows min/max macro collisions
-target_compile_definitions(optix_wrapper PRIVATE NOMINMAX)
+# Avoid Windows min/max macro collisions and pass tuning macros.
+target_compile_definitions(optix_wrapper PRIVATE
+        NOMINMAX
+        OPTIX_MAX_REG_COUNT=${OPTIX_MAX_REG_COUNT}
+        OPTIX_LAUNCH_BLOCK_SIZE=${OPTIX_LAUNCH_BLOCK_SIZE}
+        OPTIX_STACK_SIZE_SCALE=${OPTIX_STACK_SIZE_SCALE}
+)
 
 # Pass the PTX file as a *string literal* macro usable as: const char* p = OPTIX_PTX_PATH;
 string(REPLACE "\\" "/" PTX_SLASHED "${PTX}")
