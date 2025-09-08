@@ -153,9 +153,16 @@ struct alignas( OPTIX_SBT_RECORD_ALIGNMENT ) SbtRecord
 
 struct EmptyData {};
 
+struct Material {
+  float3 base_color;
+  float3 emission;
+  float3 specular;
+  float  roughness;
+  float  metallic;
+};
+
 struct HitData {
-  float3 kd;
-  float3 ke;
+  Material mat;
 };
 
 // Host/device params must match the device-side struct layout.
@@ -241,9 +248,8 @@ struct State
   std::vector<float3> vertices;
   std::vector<uint3>  indices;
   std::vector<float3> normals;
-  // Per-triangle diffuse/emissive colors used when building SBT records.
-  std::vector<float3> kd;
-  std::vector<float3> ke;
+  // Per-triangle materials used when building SBT records.
+  std::vector<Material> materials;
   // Per-triangle SBT indices for associating primitives with records.
   std::vector<uint32_t> sbt_index;
 
@@ -326,9 +332,20 @@ static void addQuad(std::vector<float3>& V, std::vector<uint3>& I,
   I.push_back(make_uint3(base+0, base+2, base+3));
 }
 
+static Material makeMaterial(const float3& base, const float3& emit)
+{
+  Material m{};
+  m.base_color = base;
+  m.emission   = emit;
+  m.specular   = make_float3(0.04f,0.04f,0.04f);
+  m.roughness  = 0.5f;
+  m.metallic   = 0.0f;
+  return m;
+}
+
 static void buildCornell(State& s)
 {
-  s.vertices.clear(); s.indices.clear(); s.normals.clear(); s.kd.clear(); s.ke.clear(); s.sbt_index.clear();
+  s.vertices.clear(); s.indices.clear(); s.normals.clear(); s.materials.clear(); s.sbt_index.clear();
 
   const float3 red   = make_float3(0.49f, 0.056f, 0.016f);
   const float3 green = make_float3(0.272f, 0.733f, 0.088f);
@@ -349,28 +366,23 @@ static void buildCornell(State& s)
 
   // floor (white)
   addQuad(s.vertices, s.indices, D,C,B,A);
-  s.kd.push_back(white); s.kd.push_back(white);
-  s.ke.push_back(black); s.ke.push_back(black);
+  s.materials.push_back(makeMaterial(white, black)); s.materials.push_back(makeMaterial(white, black));
 
   // ceiling (white)
   addQuad(s.vertices, s.indices, Au,Bu,Cu,Du);
-  s.kd.push_back(white); s.kd.push_back(white);
-  s.ke.push_back(black); s.ke.push_back(black);
+  s.materials.push_back(makeMaterial(white, black)); s.materials.push_back(makeMaterial(white, black));
 
   // back wall (white)
   addQuad(s.vertices, s.indices, B,Bu,Au,A);
-  s.kd.push_back(white); s.kd.push_back(white);
-  s.ke.push_back(black); s.ke.push_back(black);
+  s.materials.push_back(makeMaterial(white, black)); s.materials.push_back(makeMaterial(white, black));
 
   // right wall (green)
   addQuad(s.vertices, s.indices, C,Cu,Bu,B);
-  s.kd.push_back(green); s.kd.push_back(green);
-  s.ke.push_back(black); s.ke.push_back(black);
+  s.materials.push_back(makeMaterial(green, black)); s.materials.push_back(makeMaterial(green, black));
 
   // left wall (red)
   addQuad(s.vertices, s.indices, A,Au,Du,D);
-  s.kd.push_back(red); s.kd.push_back(red);
-  s.ke.push_back(black); s.ke.push_back(black);
+  s.materials.push_back(makeMaterial(red, black)); s.materials.push_back(makeMaterial(red, black));
 
   // ceiling light cutout (small rectangle) — make it emissive
   const float3 L0 = make_float3(-0.3f, 1.999f, -0.3f);
@@ -378,8 +390,7 @@ static void buildCornell(State& s)
   const float3 L2 = make_float3( 0.3f, 1.999f,  0.3f);
   const float3 L3 = make_float3(-0.3f, 1.999f,  0.3f);
   addQuad(s.vertices, s.indices, L0,L1,L2,L3);
-  s.kd.push_back(white); s.kd.push_back(white);
-  s.ke.push_back(emit);  s.ke.push_back(emit);
+  s.materials.push_back(makeMaterial(white, emit));  s.materials.push_back(makeMaterial(white, emit));
 
   // optional: a short box (white)
   {
@@ -396,8 +407,7 @@ static void buildCornell(State& s)
 
     auto addRect = [&](float3 a,float3 b,float3 c,float3 d){
       addQuad(s.vertices, s.indices, a,b,c,d);
-      s.kd.push_back(white); s.kd.push_back(white);
-      s.ke.push_back(black); s.ke.push_back(black);
+      s.materials.push_back(makeMaterial(white, black)); s.materials.push_back(makeMaterial(white, black));
     };
     addRect(p3,p2,p1,p0); // bottom
     addRect(q3,q2,q1,q0); // top
@@ -651,21 +661,17 @@ static void createPipeline(State& s)
   for (uint32_t i = 0; i < num_tris; ++i) {
     HitgroupRecord& rec_rad = s.hg_rec_rgb[i * RAY_TYPE_COUNT + RAY_RADIANCE];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_rad, &rec_rad));
-    rec_rad.data.kd = s.kd[i];
-    rec_rad.data.ke = s.ke[i];
+    rec_rad.data.mat = s.materials[i];
     HitgroupRecord& rec_sh = s.hg_rec_rgb[i * RAY_TYPE_COUNT + RAY_SHADOW];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_sh, &rec_sh));
-    rec_sh.data.kd = make_float3(0.f,0.f,0.f);
-    rec_sh.data.ke = make_float3(0.f,0.f,0.f);
+    rec_sh.data.mat = Material{};
 
     HitgroupRecord& rec_rad_b = s.hg_rec_bayer[i * RAY_TYPE_COUNT + RAY_RADIANCE];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_rad_bayer, &rec_rad_b));
-    rec_rad_b.data.kd = s.kd[i];
-    rec_rad_b.data.ke = s.ke[i];
+    rec_rad_b.data.mat = s.materials[i];
     HitgroupRecord& rec_sh_b = s.hg_rec_bayer[i * RAY_TYPE_COUNT + RAY_SHADOW];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_sh, &rec_sh_b));
-    rec_sh_b.data.kd = make_float3(0.f,0.f,0.f);
-    rec_sh_b.data.ke = make_float3(0.f,0.f,0.f);
+    rec_sh_b.data.mat = Material{};
   }
 
   CUdeviceptr d_rg_rgb=0, d_rg_bayer=0;
@@ -855,6 +861,21 @@ void  optix_ctx_set_camera(void* handle,
                                    std::tan(fovY*0.5f)*Vv.z);
 
   CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
+}
+
+extern "C" __declspec(dllexport)
+void optix_upload_materials(const Material* mats, uint32_t count)
+{
+  if (!g_handle) return;
+  auto& s = *reinterpret_cast<State*>(g_handle);
+  if (count != s.materials.size()) return;
+  for (uint32_t i = 0; i < count; ++i) s.materials[i] = mats[i];
+  for (uint32_t i = 0; i < count; ++i) {
+    s.hg_rec_rgb[i * RAY_TYPE_COUNT + RAY_RADIANCE].data.mat = s.materials[i];
+    s.hg_rec_bayer[i * RAY_TYPE_COUNT + RAY_RADIANCE].data.mat = s.materials[i];
+  }
+  CU_CHECK(cuMemcpyHtoD(s.d_sbt_hg_rgb, s.hg_rec_rgb.data(), sizeof(HitgroupRecord) * s.hg_rec_rgb.size()));
+  CU_CHECK(cuMemcpyHtoD(s.d_sbt_hg_bayer, s.hg_rec_bayer.data(), sizeof(HitgroupRecord) * s.hg_rec_bayer.size()));
 }
 
 static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)

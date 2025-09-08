@@ -7,6 +7,46 @@ use ravif::{BitDepth, MatrixCoefficients};
 use std::ffi::c_int;
 use std::fs::File;
 use std::time::Instant;
+use serde::Deserialize;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Material {
+    pub base_color: [f32; 3],
+    pub emission: [f32; 3],
+    pub specular: [f32; 3],
+    pub roughness: f32,
+    pub metallic: f32,
+}
+
+#[derive(Deserialize)]
+struct MaterialDef {
+    base_color: [f32; 3],
+    emission: [f32; 3],
+    #[serde(default)]
+    specular: Option<[f32; 3]>,
+    roughness: f32,
+    metallic: f32,
+}
+
+fn load_materials() -> Vec<Material> {
+    let path = "materials.json";
+    if let Ok(data) = std::fs::read_to_string(path) {
+        if let Ok(defs) = serde_json::from_str::<Vec<MaterialDef>>(&data) {
+            return defs
+                .into_iter()
+                .map(|d| Material {
+                    base_color: d.base_color,
+                    emission: d.emission,
+                    specular: d.specular.unwrap_or([0.04, 0.04, 0.04]),
+                    roughness: d.roughness,
+                    metallic: d.metallic,
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
 
 // ---- FFI selection ----------------------------------------------------------
 // Default: plain CUDA kernels (what you have working now)
@@ -31,6 +71,7 @@ extern "C" {
     fn optix_alloc_host(bytes: usize) -> *mut std::ffi::c_void;
     fn optix_free_host(ptr: *mut std::ffi::c_void);
     fn optix_synchronize();
+    fn optix_upload_materials(mats: *const Material, count: u32);
 }
 
 // Stable shims used by the rest of main():
@@ -555,6 +596,11 @@ fn main() {
 
     let rgb = unsafe { std::slice::from_raw_parts_mut(rgb_ptr, (w * h * 3) as usize) };
     let bayer = unsafe { std::slice::from_raw_parts_mut(bayer_ptr, (w * h) as usize) };
+
+    let materials = load_materials();
+    unsafe {
+        optix_upload_materials(materials.as_ptr(), materials.len() as u32);
+    }
 
     let t0 = Instant::now();
     assert_eq!(ffi_render_rgb(w, h, spp, rgb_ptr), 0);

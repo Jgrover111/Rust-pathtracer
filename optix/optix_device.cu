@@ -39,11 +39,19 @@ extern "C" {
 __constant__ Params params;
 }
 
+struct Material
+{
+  float3 base_color;
+  float3 emission;
+  float3 specular;
+  float  roughness;
+  float  metallic;
+};
+
 // SBT data for each primitive
 struct HitgroupData
 {
-  float3 kd; // diffuse reflectance
-  float3 ke; // emission
+  Material mat;
 };
 
 enum {
@@ -181,6 +189,118 @@ static __forceinline__ __device__ void make_onb(const float3& n, float3& t, floa
   }
 }
 
+static __forceinline__ __device__ float luminance(const float3& c)
+{
+  return 0.2126f*c.x + 0.7152f*c.y + 0.0722f*c.z;
+}
+
+static __forceinline__ __device__ float3 fresnel_schlick(float cosTheta, const float3& F0)
+{
+  return F0 + (make3(1.0f) - F0) * powf(1.0f - cosTheta, 5.0f);
+}
+
+static __forceinline__ __device__ float D_GGX(float NdotH, float alpha)
+{
+  float a2 = alpha * alpha;
+  float denom = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
+  return a2 / (CUDART_PI_F * denom * denom);
+}
+
+static __forceinline__ __device__ float G1_GGX(float NdotV, float alpha)
+{
+  float a = alpha;
+  float b = NdotV;
+  return 2.0f * b / (b + sqrtf(a*a + (1.0f - a*a) * b * b));
+}
+
+static __forceinline__ __device__ float G_Smith(float NdotV, float NdotL, float alpha)
+{
+  return G1_GGX(NdotV, alpha) * G1_GGX(NdotL, alpha);
+}
+
+static __forceinline__ __device__ float3 eval_bsdf(const Material& m, const float3& N, const float3& V, const float3& L)
+{
+  float3 H = normalize3(V + L);
+  float NdotL = fmaxf(dot3(N, L), 0.0f);
+  float NdotV = fmaxf(dot3(N, V), 0.0f);
+  float NdotH = fmaxf(dot3(N, H), 0.0f);
+  float VdotH = fmaxf(dot3(V, H), 0.0f);
+  float alpha = fmaxf(m.roughness * m.roughness, 1e-4f);
+  float3 F0 = m.specular * (1.0f - m.metallic) + m.base_color * m.metallic;
+  float3 F = fresnel_schlick(VdotH, F0);
+  float D = D_GGX(NdotH, alpha);
+  float G = G_Smith(NdotV, NdotL, alpha);
+  float3 spec = F * (D * G / fmaxf(4.0f * NdotV * NdotL, 1e-4f));
+  float3 diff = (1.0f - m.metallic) * m.base_color * (1.0f / CUDART_PI_F);
+  return diff + spec;
+}
+
+static __forceinline__ __device__ float pdf_bsdf(const Material& m, const float3& N, const float3& V, const float3& L)
+{
+  float3 H = normalize3(V + L);
+  float NdotL = fmaxf(dot3(N, L), 0.0f);
+  float NdotV = fmaxf(dot3(N, V), 0.0f);
+  float NdotH = fmaxf(dot3(N, H), 0.0f);
+  float VdotH = fmaxf(dot3(V, H), 0.0f);
+  float alpha = fmaxf(m.roughness * m.roughness, 1e-4f);
+  float diff_w = (1.0f - m.metallic) * luminance(m.base_color);
+  float3 F0 = m.specular * (1.0f - m.metallic) + m.base_color * m.metallic;
+  float spec_w = luminance(F0);
+  float pd = diff_w / fmaxf(diff_w + spec_w, 1e-4f);
+  float ps = 1.0f - pd;
+  float pdf_diff = NdotL * (1.0f / CUDART_PI_F);
+  float pdf_spec = D_GGX(NdotH, alpha) * NdotH / fmaxf(4.0f * VdotH, 1e-4f);
+  return pd * pdf_diff + ps * pdf_spec;
+}
+
+static __forceinline__ __device__ float3 sample_bsdf(const Material& m, const float3& N, const float3& V, unsigned long long& seed, float3& L, float& pdf)
+{
+  float diff_w = (1.0f - m.metallic) * luminance(m.base_color);
+  float3 F0 = m.specular * (1.0f - m.metallic) + m.base_color * m.metallic;
+  float spec_w = luminance(F0);
+  float pd = diff_w / fmaxf(diff_w + spec_w, 1e-4f);
+  float r = rnd(seed);
+  if (r < pd) {
+    // diffuse
+    float r1 = rnd(seed);
+    float r2 = rnd(seed);
+    const float phi = 2.0f * CUDART_PI_F * r1;
+    const float cosTheta = sqrtf(1.0f - r2);
+    const float sinTheta = sqrtf(r2);
+    float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+    float3 t, b;
+    make_onb(N, t, b);
+    L = normalize(localDir.x * t + localDir.y * b + localDir.z * N);
+    pdf = pd * cosTheta * (1.0f / CUDART_PI_F);
+    float3 f = (1.0f - m.metallic) * m.base_color * (1.0f / CUDART_PI_F);
+    return f * cosTheta / fmaxf(pdf, 1e-4f);
+  } else {
+    // specular GGX
+    float r1 = rnd(seed);
+    float r2 = rnd(seed);
+    float a = fmaxf(m.roughness * m.roughness, 1e-4f);
+    float phi = 2.0f * CUDART_PI_F * r1;
+    float cosTheta = sqrtf((1.0f - r2) / (1.0f + (a*a - 1.0f) * r2));
+    float sinTheta = sqrtf(fmaxf(1.0f - cosTheta * cosTheta, 0.0f));
+    float3 localH = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+    float3 t, b;
+    make_onb(N, t, b);
+    float3 H = normalize(localH.x * t + localH.y * b + localH.z * N);
+    L = normalize(2.0f * dot3(V, H) * H - V);
+    float NdotL = fmaxf(dot3(N, L), 0.0f);
+    float NdotV = fmaxf(dot3(N, V), 0.0f);
+    float NdotH = fmaxf(dot3(N, H), 0.0f);
+    float VdotH = fmaxf(dot3(V, H), 0.0f);
+    float D = D_GGX(NdotH, a);
+    float pdf_spec = D * NdotH / fmaxf(4.0f * VdotH, 1e-4f);
+    pdf = (1.0f - pd) * pdf_spec;
+    float3 F = fresnel_schlick(VdotH, F0);
+    float G = G_Smith(NdotV, NdotL, a);
+    float3 spec = F * (D * G / fmaxf(4.0f * NdotV * NdotL, 1e-4f));
+    return spec * NdotL / fmaxf(pdf, 1e-4f);
+  }
+}
+
 // --- payload packing -------------------------------------------------------
 
 static __forceinline__ __device__ void packPtr(void* ptr, unsigned int& u0, unsigned int& u1) {
@@ -287,25 +407,23 @@ extern "C" __global__ void __closesthit__ch()
     const float3 P  = v0 * b0 + v1 * b1 + v2 * b2;
     const float3 Ng = normalize3(reinterpret_cast<const float3*>(params.d_normals)[prim]);
 
-    // Fetch per-triangle materials from SBT
     const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());
-    const float3 kd = hg->kd;
-    const float3 ke = hg->ke;
+    const Material& mat = hg->mat;
 
-    // Sample direct illumination from rectangular area light
     unsigned long long& seed = prd.seed;
+    float3 V = normalize3(-prd.direction);
+
     float3 Lo = make3(0.0f);
     {
         float u = (rnd(seed) * 2.0f - 1.0f) * params.light_half.x;
         float v = (rnd(seed) * 2.0f - 1.0f) * params.light_half.y;
         float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y, params.light_pos.z + v);
         float3 L = lp - P;
-        float dist2 = fmaxf(dot(L, L), 1e-6f);
+        float dist2 = fmaxf(dot3(L, L), 1e-6f);
         float dist = sqrtf(dist2);
         float3 wi = L / dist;
-        float3 light_n = make_float3(0.0f, -1.0f, 0.0f);
-        float cosS = fmaxf(0.0f, dot(Ng, wi));
-        float cosL = fmaxf(0.0f, dot(params.light_normal, wi * -1.0f));
+        float cosS = fmaxf(0.0f, dot3(Ng, wi));
+        float cosL = fmaxf(0.0f, dot3(params.light_normal, wi * -1.0f));
         if (cosS > 0.0f && cosL > 0.0f) {
             unsigned int occluded = 0u;
             optixTrace(
@@ -325,45 +443,35 @@ extern "C" __global__ void __closesthit__ch()
                 float area = 4.0f * params.light_half.x * params.light_half.y;
                 float pdf_area = 1.0f / area;
                 float pdf_light = pdf_area * dist2 / cosL;
-                float pdf_bsdf = cosS * (1.0f / CUDART_PI_F);
-                float w = pdf_light / (pdf_light + pdf_bsdf);
-                float3 f = kd * (1.0f / CUDART_PI_F);
+                float pdf_bsdf_val = pdf_bsdf(mat, Ng, V, wi);
+                float w = pdf_light / (pdf_light + pdf_bsdf_val);
+                float3 f = eval_bsdf(mat, Ng, V, wi);
                 float3 contrib = params.light_emit * f * (cosS * cosL / dist2) / pdf_area;
                 Lo += contrib * w;
             }
         }
     }
 
-    // Accumulate emission with MIS and direct light
-    float3 emission = ke;
-    if (prd.prev_pdf_valid && (ke.x > 0.0f || ke.y > 0.0f || ke.z > 0.0f)) {
+    float3 emission = mat.emission;
+    if (prd.prev_pdf_valid && (emission.x > 0.0f || emission.y > 0.0f || emission.z > 0.0f)) {
         float3 L = P - prd.origin;
-        float dist2 = fmaxf(dot(L, L), 1e-6f);
+        float dist2 = fmaxf(dot3(L, L), 1e-6f);
+        float cosL = fmaxf(0.0f, dot3(params.light_normal, prd.direction * -1.0f));
         float area = 4.0f * params.light_half.x * params.light_half.y;
-        float3 light_n = make_float3(0.0f, -1.0f, 0.0f);
-        float cosL = fmaxf(0.0f, dot(params.light_normal, prd.direction * -1.0f));
         float pdf_light = dist2 / (cosL * area);
         float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
         emission = emission * w_bsdf;
     }
     prd.radiance += emission + Lo;
 
-    // Sample diffuse direction (cosine-weighted)
-    float r1 = rnd(seed);
-    float r2 = rnd(seed);
-    const float phi = 2.0f * CUDART_PI_F * r1;
-    const float cosTheta = sqrtf(1.0f - r2);
-    const float sinTheta = sqrtf(r2);
-    float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
-
-    float3 tangent, bitangent;
-    make_onb(Ng, tangent, bitangent);
-    float3 newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
+    float3 newDir;
+    float pdf_bs;
+    float3 weight = sample_bsdf(mat, Ng, V, seed, newDir, pdf_bs);
 
     prd.origin = P + Ng * 1e-3f;
     prd.direction = newDir;
-    prd.throughput = mul(prd.throughput, kd);
-    prd.prev_pdf_bsdf = cosTheta * (1.0f / CUDART_PI_F);
+    prd.throughput = mul(prd.throughput, weight);
+    prd.prev_pdf_bsdf = pdf_bs;
     prd.prev_pdf_valid = 1;
 
     prd.depth++;
@@ -404,25 +512,22 @@ extern "C" __global__ void __closesthit__ch_bayer()
     const float3 Ng = normalize3(reinterpret_cast<const float3*>(params.d_normals)[prim]);
 
     const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());
-    const float3 kd = hg->kd;
-    const float3 ke = hg->ke;
-
+    const Material& mat = hg->mat;
     const int ch = prd.ch;
-    float albedo = select(kd, ch);
-    float emission = select(ke, ch);
 
     unsigned long long& seed = prd.seed;
+    float3 V = normalize3(-prd.direction);
     float Lo = 0.0f;
     {
         float u = (rnd(seed) * 2.0f - 1.0f) * params.light_half.x;
         float v = (rnd(seed) * 2.0f - 1.0f) * params.light_half.y;
         float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y, params.light_pos.z + v);
         float3 L = lp - P;
-        float dist2 = fmaxf(dot(L, L), 1e-6f);
+        float dist2 = fmaxf(dot3(L, L), 1e-6f);
         float dist = sqrtf(dist2);
         float3 wi = L / dist;
-        float cosS = fmaxf(0.0f, dot(Ng, wi));
-        float cosL = fmaxf(0.0f, dot(params.light_normal, wi * -1.0f));
+        float cosS = fmaxf(0.0f, dot3(Ng, wi));
+        float cosL = fmaxf(0.0f, dot3(params.light_normal, wi * -1.0f));
         if (cosS > 0.0f && cosL > 0.0f) {
             unsigned int occluded = 0u;
             optixTrace(
@@ -442,42 +547,36 @@ extern "C" __global__ void __closesthit__ch_bayer()
                 float area = 4.0f * params.light_half.x * params.light_half.y;
                 float pdf_area = 1.0f / area;
                 float pdf_light = pdf_area * dist2 / cosL;
-                float pdf_bsdf = cosS * (1.0f / CUDART_PI_F);
-                float w = pdf_light / (pdf_light + pdf_bsdf);
-                float f = albedo * (1.0f / CUDART_PI_F);
+                float pdf_bsdf_val = pdf_bsdf(mat, Ng, V, wi);
+                float w = pdf_light / (pdf_light + pdf_bsdf_val);
+                float3 f = eval_bsdf(mat, Ng, V, wi);
                 float Le = select(params.light_emit, ch);
-                float contrib = Le * f * (cosS * cosL / dist2) / pdf_area;
+                float contrib = Le * select(f, ch) * (cosS * cosL / dist2) / pdf_area;
                 Lo += contrib * w;
             }
         }
     }
 
+    float emission = select(mat.emission, ch);
     if (prd.prev_pdf_valid && emission > 0.0f) {
         float3 L = P - prd.origin;
-        float dist2 = fmaxf(dot(L, L), 1e-6f);
+        float dist2 = fmaxf(dot3(L, L), 1e-6f);
+        float cosL = fmaxf(0.0f, dot3(params.light_normal, prd.direction * -1.0f));
         float area = 4.0f * params.light_half.x * params.light_half.y;
-        float cosL = fmaxf(0.0f, dot(params.light_normal, prd.direction * -1.0f));
         float pdf_light = dist2 / (cosL * area);
         float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
         emission *= w_bsdf;
     }
     prd.radiance += emission + Lo;
 
-    float r1 = rnd(seed);
-    float r2 = rnd(seed);
-    const float phi = 2.0f * CUDART_PI_F * r1;
-    const float cosTheta = sqrtf(1.0f - r2);
-    const float sinTheta = sqrtf(r2);
-    float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
-
-    float3 tangent, bitangent;
-    make_onb(Ng, tangent, bitangent);
-    float3 newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
+    float3 newDir;
+    float pdf_bs;
+    float3 weight = sample_bsdf(mat, Ng, V, seed, newDir, pdf_bs);
 
     prd.origin = P + Ng * 1e-3f;
     prd.direction = newDir;
-    prd.throughput *= albedo;
-    prd.prev_pdf_bsdf = cosTheta * (1.0f / CUDART_PI_F);
+    prd.throughput *= select(weight, ch);
+    prd.prev_pdf_bsdf = pdf_bs;
     prd.prev_pdf_valid = 1;
 
     prd.depth++;

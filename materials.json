@@ -1,0 +1,9 @@
+[
+  {
+    "base_color": [0.8, 0.8, 0.8],
+    "emission": [0.0, 0.0, 0.0],
+    "specular": [0.04, 0.04, 0.04],
+    "roughness": 0.5,
+    "metallic": 0.0
+  }
+]
