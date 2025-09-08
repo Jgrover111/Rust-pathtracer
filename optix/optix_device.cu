@@ -157,6 +157,17 @@ static __forceinline__ __device__ float2 blue_noise(int x, int y, int s, int fra
   return make_float2(u, v);
 }
 
+static __forceinline__ __device__ float sample_tri(float u)
+{
+  return (u < 0.5f) ? sqrtf(2.0f * u) - 1.0f : 1.0f - sqrtf(2.0f * (1.0f - u));
+}
+
+static __forceinline__ __device__ float2 olpf_jitter(int x, int y, int s, int frame)
+{
+  float2 u = blue_noise(x, y, s, frame);
+  return make_float2(sample_tri(u.x), sample_tri(u.y));
+}
+
 static __forceinline__ __device__ void make_onb(const float3& n, float3& t, float3& b)
 {
   if (n.z < -0.9999999f) {
@@ -488,10 +499,12 @@ extern "C" __global__ void __closesthit__ch_bayer()
 
 static __forceinline__ __device__ float3 sample_camera_dir(int x, int y, const float2& jitter)
 {
-  const uint3  dim = optixGetLaunchDimensions();
-  const float  fx  = (float(x) + jitter.x) / float(dim.x);
-  const float  fy  = (float(y) + jitter.y) / float(dim.y);
-  const float2 d   = make_float2(2.0f*fx - 1.0f, 1.0f - 2.0f*fy);
+  const uint3 dim = optixGetLaunchDimensions();
+  float fx = (float(x) + 0.5f + jitter.x) / float(dim.x);
+  float fy = (float(y) + 0.5f + jitter.y) / float(dim.y);
+  fx = clamp01(fx);
+  fy = clamp01(fy);
+  const float2 d = make_float2(2.0f * fx - 1.0f, 1.0f - 2.0f * fy);
   return normalize3(params.cam_w + d.x * params.cam_u + d.y * params.cam_v);
 }
 
@@ -533,7 +546,7 @@ extern "C" __global__ void __raygen__rg()
     prd.radiance = make3(0.0f);
     prd.throughput = make3(1.0f);
     prd.origin = org;
-    float2 jitter = blue_noise(x, y, s, params.frame);
+    float2 jitter = olpf_jitter(x, y, s, params.frame);
     prd.direction = sample_camera_dir(x, y, jitter);
     prd.depth = 0;
     prd.done = 0;
@@ -601,7 +614,7 @@ extern "C" __global__ void __raygen__bayer()
     prd.radiance = 0.0f;
     prd.throughput = 1.0f;
     prd.origin = org;
-    float2 jitter = blue_noise(x, y, s, params.frame);
+    float2 jitter = olpf_jitter(x, y, s, params.frame);
     prd.direction = sample_camera_dir(x, y, jitter);
     prd.depth = 0;
     prd.done = 0;
