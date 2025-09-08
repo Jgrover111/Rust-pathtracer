@@ -330,9 +330,9 @@ static void buildCornell(State& s)
 {
   s.vertices.clear(); s.indices.clear(); s.normals.clear(); s.kd.clear(); s.ke.clear(); s.sbt_index.clear();
 
-  const float3 red   = make_float3(0.63f, 0.065f, 0.05f);
-  const float3 green = make_float3(0.14f, 0.45f, 0.091f);
-  const float3 white = make_float3(0.725f,0.71f,0.68f);
+  const float3 red   = make_float3(0.49f, 0.056f, 0.016f);
+  const float3 green = make_float3(0.272f, 0.733f, 0.088f);
+  const float3 white = make_float3(0.789f,0.801f,0.800f);
   const float3 black = make_float3(0,0,0);
   const float3 emit  = make_float3(15.f, 15.f, 15.f);
 
