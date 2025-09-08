@@ -310,6 +310,75 @@ fn demosaic_amaze(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     out
 }
 
+fn demosaic_bilinear(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
+    let mut out = vec![0f32; (w * h * 3) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = idx(x, y, w);
+            let v = raw[i];
+            match cfa_at(x, y, pattern) {
+                CFA::R => {
+                    let g = (getf(raw, w, h, x - 1, y)
+                        + getf(raw, w, h, x + 1, y)
+                        + getf(raw, w, h, x, y - 1)
+                        + getf(raw, w, h, x, y + 1))
+                        * 0.25;
+                    let b = (getf(raw, w, h, x - 1, y - 1)
+                        + getf(raw, w, h, x + 1, y - 1)
+                        + getf(raw, w, h, x - 1, y + 1)
+                        + getf(raw, w, h, x + 1, y + 1))
+                        * 0.25;
+                    out[i * 3] = v;
+                    out[i * 3 + 1] = g;
+                    out[i * 3 + 2] = b;
+                }
+                CFA::B => {
+                    let g = (getf(raw, w, h, x - 1, y)
+                        + getf(raw, w, h, x + 1, y)
+                        + getf(raw, w, h, x, y - 1)
+                        + getf(raw, w, h, x, y + 1))
+                        * 0.25;
+                    let r = (getf(raw, w, h, x - 1, y - 1)
+                        + getf(raw, w, h, x + 1, y - 1)
+                        + getf(raw, w, h, x - 1, y + 1)
+                        + getf(raw, w, h, x + 1, y + 1))
+                        * 0.25;
+                    out[i * 3] = r;
+                    out[i * 3 + 1] = g;
+                    out[i * 3 + 2] = v;
+                }
+                CFA::G => {
+                    let r;
+                    let b;
+                    if matches!(cfa_at(x - 1, y, pattern), CFA::R)
+                        || matches!(cfa_at(x + 1, y, pattern), CFA::R)
+                    {
+                        r = (getf(raw, w, h, x - 1, y) + getf(raw, w, h, x + 1, y)) * 0.5;
+                        b = (getf(raw, w, h, x, y - 1) + getf(raw, w, h, x, y + 1)) * 0.5;
+                    } else {
+                        r = (getf(raw, w, h, x, y - 1) + getf(raw, w, h, x, y + 1)) * 0.5;
+                        b = (getf(raw, w, h, x - 1, y) + getf(raw, w, h, x + 1, y)) * 0.5;
+                    }
+                    out[i * 3] = r;
+                    out[i * 3 + 1] = v;
+                    out[i * 3 + 2] = b;
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(feature = "fast-demosaic")]
+fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
+    demosaic_bilinear(raw, w, h, pattern)
+}
+
+#[cfg(not(feature = "fast-demosaic"))]
+fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
+    demosaic_amaze(raw, w, h, pattern)
+}
+
 fn percentile(arr: &[f32], p: f32) -> f32 {
     let mut v: Vec<f32> = arr.to_vec();
     let n = v.len();
@@ -475,7 +544,7 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 256;
+    let spp = 8192;
     let pattern = 0;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
@@ -512,7 +581,9 @@ fn main() {
     save_png_srgb_from_acescg("pt.png", w, h, &rgb, exp_rgb);
     println!("✅ Saved pt.png (render {:?})", t_rgb);
 
-    let demosaiced = demosaic_amaze(&bayer, w, h, pattern);
+    let t2 = Instant::now();
+    let demosaiced = demosaic(&bayer, w, h, pattern);
+    let t_demosaic = t2.elapsed();    let mut l2 = Vec::with_capacity((w * h) as usize);
     let mut l2 = Vec::with_capacity((w * h) as usize);
     for i in 0..(w * h) as usize {
         let r = demosaiced[i * 3];
@@ -523,6 +594,15 @@ fn main() {
     let exp_raw = 0.85 / percentile(&l2, 0.85);
 
     println!("Bayer render: {:?}", t_raw);
+    println!(
+        "Demosaic ({}): {:?}",
+        if cfg!(feature = "fast-demosaic") {
+            "bilinear"
+        } else {
+            "AMaZE"
+        },
+        t_demosaic
+    );
 
     save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exp_raw);
     save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exp_rgb);
