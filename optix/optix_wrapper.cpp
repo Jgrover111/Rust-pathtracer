@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <cstddef>
 #include <vector>
 #include <array>
 #include <string>
@@ -260,6 +261,10 @@ struct State
     if (d_out_bayer) cuMemFree(d_out_bayer);
     if (d_params)    cuMemFree(d_params);
     if (stream)      cuStreamDestroy(stream);
+
+    // h_params is registered as pinned host memory for async transfers.
+    if (cuCtx) CU_CHECK(cuCtxSetCurrent(cuCtx));
+    CU_CHECK(cuMemHostUnregister(&h_params));
 
     if (d_vertices)  cuMemFree(d_vertices);
     if (d_indices)   cuMemFree(d_indices);
@@ -745,8 +750,11 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.frame     = 0;
   st->h_params.bayer_pattern = 0;
 
+  // Pin host params so subsequent uploads can use async copies.
+  CU_CHECK(cuMemHostRegister(&st->h_params, sizeof(Params), 0));
+
   CU_CHECK(cuMemAlloc(&st->d_params, sizeof(Params)));
-  CU_CHECK(cuMemcpyHtoD(st->d_params, &st->h_params, sizeof(Params)));
+  CU_CHECK(cuMemcpyHtoDAsync(st->d_params, &st->h_params, sizeof(Params), st->stream));
 
   return st.release();
 }
@@ -774,7 +782,7 @@ void  optix_ctx_set_bayer(void* handle, int pattern /*0..3*/)
   auto& s = *reinterpret_cast<State*>(handle);
   s.bayer_pattern = pattern;
   s.h_params.bayer_pattern = pattern;
-  CU_CHECK(cuMemcpyHtoD(s.d_params, &s.h_params, sizeof(Params)));
+  CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
 }
 
 extern "C" __declspec(dllexport)
@@ -804,7 +812,7 @@ void  optix_ctx_set_camera(void* handle,
                                    std::tan(fovY*0.5f)*Vv.y,
                                    std::tan(fovY*0.5f)*Vv.z);
 
-  CU_CHECK(cuMemcpyHtoD(s.d_params, &s.h_params, sizeof(Params)));
+  CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
 }
 
 static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
@@ -818,7 +826,7 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
     // If your renderer needs any per-frame fields set, do it here.
     // e.g., s.h_params.bayer_pattern = s.bayer_pattern;   // (RGB path usually not needed)
 
-    CU_CHECK( cuMemcpyHtoD(s.d_params, &s.h_params, sizeof(Params)) );
+    CU_CHECK( cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream) );
 
     OTK_CHECK( optixLaunch(
         s.pipeline,
@@ -830,9 +838,8 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
 
     // interleaved RGB float32
     const size_t bytes = size_t(s.width) * size_t(s.height) * 3 * sizeof(float);
-    // Host memory is typically not page-locked, so use synchronous copy
-    // to avoid CUDA_ERROR_INVALID_VALUE from cuMemcpyDtoHAsync.
-    CU_CHECK( cuMemcpyDtoH(out_rgb, s.d_out_rgb, bytes) );
+    // out_rgb must point to page-locked memory (allocated via optix_alloc_host)
+    CU_CHECK( cuMemcpyDtoHAsync(out_rgb, s.d_out_rgb, bytes, s.stream) );
 
     return 0;
 }
@@ -843,11 +850,11 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
-        s.h_params.spp = spp;
+    s.h_params.spp = spp;
     s.h_params.bayer_pattern = s.bayer_pattern;  // keep whatever you already store in s.bayer_pattern
-    CUdeviceptr saved_out_rgb = s.h_params.out_rgb;
-    s.h_params.out_rgb = 0;
-    CU_CHECK( cuMemcpyHtoD(s.d_params, &s.h_params, sizeof(Params)) );
+    CU_CHECK( cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream) );
+    // Disable RGB output for this launch by zeroing the device-side pointer.
+    CU_CHECK( cuMemsetD8Async(s.d_params + offsetof(Params, out_rgb), 0, sizeof(CUdeviceptr), s.stream) );
 
     OTK_CHECK( optixLaunch(
         s.pipeline,
@@ -858,10 +865,9 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
         /*w,h,d*/ s.width, s.height, 1) );
 
     const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(float);
-    // As above, perform a synchronous copy since the host buffer may not be pinned.
-    CU_CHECK( cuMemcpyDtoH(out_raw, s.d_out_bayer, bytes) );
+    // As above, perform an async copy to the page-locked host buffer.
+    CU_CHECK( cuMemcpyDtoHAsync(out_raw, s.d_out_bayer, bytes, s.stream) );
 
-    s.h_params.out_rgb = saved_out_rgb;
     return 0;
 }
 

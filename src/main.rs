@@ -544,7 +544,7 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 8192;
+    let spp = 512;
     let pattern = 0;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
