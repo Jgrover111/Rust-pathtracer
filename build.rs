@@ -2,10 +2,8 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=optix/CMakeLists.txt");
-    println!("cargo:rerun-if-changed=optix/kernels.cu");
     println!("cargo:rerun-if-changed=optix/optix_wrapper.cpp");
     println!("cargo:rerun-if-changed=optix/optix_device.cu");
-    println!("cargo:rerun-if-changed=optix/cuda_fixups.cuh");
 
     let mut cfg = cmake::Config::new("optix");
 

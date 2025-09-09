@@ -15,7 +15,6 @@
 #include <cmath>
 #include <fstream>
 #include <cuda.h>
-#include <cuda_runtime.h>
 #include <vector_types.h>
 #include <vector_functions.h>
 #ifndef M_PI
@@ -35,15 +34,9 @@
 #ifndef OPTIX_MAX_REG_COUNT
 #define OPTIX_MAX_REG_COUNT 0
 #endif
-#ifndef OPTIX_LAUNCH_BLOCK_SIZE
-#define OPTIX_LAUNCH_BLOCK_SIZE 0
-#endif
 #ifndef OPTIX_STACK_SIZE_SCALE
 #define OPTIX_STACK_SIZE_SCALE 1.0f
 #endif
-
-// CUDA kernels used for occupancy queries.
-void k_render_rgb(int W,int H,int spp,float* out_rgb);
 
 // ----- tiny helpers ---------------------------------------------------------
 #define OTK_CHECK(call)                                                          \
@@ -270,7 +263,6 @@ struct State
 
   // options
   int                   bayer_pattern = 0;
-  int                   launch_block_size = 0; // occupancy derived block size
 
   ~State() {
     if (stream)      CU_CHECK(cuStreamSynchronize(stream));
@@ -528,15 +520,6 @@ static void createPipeline(State& s)
   OTK_CHECK(createModuleCompat(s.ctx, &mopts, &popts,
                                ptxBytes.data(), ptxBytes.size(),
                                log, &logSize, &s.module));
-
-  // Derive a reasonable CUDA launch block size using occupancy if requested.
-  int minGrid = 0, optBlock = 0;
-  if (cudaOccupancyMaxPotentialBlockSize(&minGrid, &optBlock,
-                                        k_render_rgb, 0, 0) == cudaSuccess) {
-    s.launch_block_size = OPTIX_LAUNCH_BLOCK_SIZE > 0 ? OPTIX_LAUNCH_BLOCK_SIZE : optBlock;
-  } else {
-    s.launch_block_size = OPTIX_LAUNCH_BLOCK_SIZE;
-  }
 
   OptixProgramGroupOptions pg_opts {};
 

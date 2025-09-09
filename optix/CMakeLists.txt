@@ -4,14 +4,12 @@ project(optix_host LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 # Allow users to provide OPTIX_ROOT via the cache or environment.
-set(OPTIX_ROOT "" CACHE PATH "Path to the OptiX SDK")
+set(OPTIX_ROOT "" CACHE PATH "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0")
 
-# Expose tunables for register usage, launch configuration and stack sizing.
+# Expose tunables for register usage and stack sizing.
 # Use CACHE STRING so the values are passed verbatim instead of "ON"/"OFF".
 set(OPTIX_MAX_REG_COUNT 0 CACHE STRING
     "Limit registers per thread for OptiX programs (0 = compiler default)")
-set(OPTIX_LAUNCH_BLOCK_SIZE 0 CACHE STRING
-    "Override CUDA launch block size (0 = occupancy derived)")
 set(OPTIX_STACK_SIZE_SCALE 1.0 CACHE STRING
     "Multiplier applied to estimated OptiX stack sizes")
 
@@ -22,7 +20,9 @@ find_package(CUDAToolkit REQUIRED)
 # Set OPTIX_ROOT to your SDK root.
 if(NOT OPTIX_ROOT)
     if(DEFINED ENV{OPTIX_ROOT} AND NOT "$ENV{OPTIX_ROOT}" STREQUAL "")
-        set(OPTIX_ROOT "$ENV{OPTIX_ROOT}" CACHE PATH "Path to the OptiX SDK" FORCE)
+        set(OPTIX_ROOT "$ENV{OPTIX_ROOT}" CACHE PATH "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0" FORCE)
+    endif()
+endif()
 if(NOT DEFINED OPTIX_ROOT)
     if(DEFINED ENV{OPTIX_ROOT})
         set(OPTIX_ROOT "$ENV{OPTIX_ROOT}")
@@ -68,7 +68,6 @@ target_include_directories(optix_stubs PUBLIC "${OPTIX_ROOT}/include")
 # ---- Host wrapper (DLL) ----
 add_library(optix_wrapper SHARED
         optix_wrapper.cpp
-        kernels.cu
 )
 add_dependencies(optix_wrapper optix_ptx)
 
@@ -83,7 +82,6 @@ target_include_directories(optix_wrapper
 target_compile_definitions(optix_wrapper PRIVATE
         NOMINMAX
         OPTIX_MAX_REG_COUNT=${OPTIX_MAX_REG_COUNT}
-        OPTIX_LAUNCH_BLOCK_SIZE=${OPTIX_LAUNCH_BLOCK_SIZE}
         OPTIX_STACK_SIZE_SCALE=${OPTIX_STACK_SIZE_SCALE}
 )
 

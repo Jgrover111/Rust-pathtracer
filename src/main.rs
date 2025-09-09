@@ -9,17 +9,7 @@ use std::fs::File;
 use std::io;
 use std::time::Instant;
 
-// ---- FFI selection ----------------------------------------------------------
-// Default: plain CUDA kernels (what you have working now)
-//#[cfg(not(feature="optix"))]
-//extern "C" {
-//    fn gpu_render_rgb(w: c_int, h: c_int, spp: c_int, out_rgb: *mut f32) -> c_int;
-//    fn gpu_render_bayer_f32(w: c_int, h: c_int, spp: c_int, pattern: c_int, out_raw: *mut f32) -> c_int;
-//}
-
-// Optional OptiX path: when you wire your OptiX wrapper to export these
-// names, compile with: cargo run --features optix
-//#[cfg(feature="optix")]
+// ---- FFI ----------------------------------------------------------
 extern "C" {
     fn optix_render_rgb(w: c_int, h: c_int, spp: c_int, out_rgb: *mut f32) -> c_int;
     fn optix_render_bayer_f32(
@@ -47,11 +37,7 @@ extern "C" {
 /// Zero on success, non-zero on failure.
 #[inline]
 fn ffi_render_rgb(w: i32, h: i32, spp: i32, out: *mut f32) -> c_int {
-    //    #[cfg(feature="optix")]
-    unsafe {
-        return optix_render_rgb(w, h, spp, out);
-    }
-    //    #[cfg(not(feature="optix"))] unsafe { return gpu_render_rgb(w, h, spp, out); }
+    unsafe { optix_render_rgb(w, h, spp, out) }
 }
 /// Render a Bayer mosaic image using the GPU backend.
 ///
@@ -66,11 +52,7 @@ fn ffi_render_rgb(w: i32, h: i32, spp: i32, out: *mut f32) -> c_int {
 /// Zero on success, non-zero on failure.
 #[inline]
 fn ffi_render_bayer_f32(w: i32, h: i32, spp: i32, pat: i32, out: *mut f32) -> c_int {
-    //    #[cfg(feature="optix")]
-    unsafe {
-        return optix_render_bayer_f32(w, h, spp, pat, out);
-    }
-    //    #[cfg(not(feature="optix"))] unsafe { return gpu_render_bayer_f32(w, h, spp, pat, out); }
+    unsafe { optix_render_bayer_f32(w, h, spp, pat, out) }
 }
 /// Allocate pinned host memory using the GPU API.
 ///
@@ -498,7 +480,8 @@ fn save_avif_rec2100_pq_from_acescg(
     h: i32,
     img_aces: &[f32],
     exposure: f32,
-) -> Result<(), io::Error> {    let n = (w * h) as usize;
+) -> Result<(), io::Error> {
+    let n = (w * h) as usize;
     let mut rgb10: Vec<rgb::RGB<u16>> = Vec::with_capacity(n);
     for y in 0..h {
         for x in 0..w {

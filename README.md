@@ -5,8 +5,8 @@ This project is a GPU-accelerated path tracer written in Rust. It renders a simp
 ## Prerequisites
 
 - Rust toolchain (edition 2021).
-- NVIDIA CUDA Toolkit and drivers. The build script uses `cmake` and `nvcc` to compile CUDA kernels.
-- (Optional) NVIDIA OptiX for the `optix` feature flag.
+- NVIDIA CUDA Toolkit and drivers. The build script uses `cmake` and `nvcc` to compile OptiX kernels.
+- NVIDIA OptiX SDK.
 
 ## Building
 
