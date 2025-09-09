@@ -443,16 +443,16 @@ extern "C" __global__ void __closesthit__ch()
         float NoV = fmaxf(dot(Ng, V), 0.0f);
         float VoH = fmaxf(dot(V, H), 0.0f);
         float NoH = fmaxf(dot(Ng, H), 0.0f);
-        float k = (alpha + 1.0f) * (alpha + 1.0f) * 0.125f;
-        float G1V = NoV / (NoV * (1.0f - k) + k);
-        float G1L = NoL / (NoL * (1.0f - k) + k);
-        float G = G1V * G1L;
+        float alpha2 = alpha * alpha;
+        float G1L = 2.0f * NoL /
+                    (NoL + sqrtf(alpha2 + (1.0f - alpha2) * NoL * NoL));
         float3 F = fresnel_schlick(VoH, F0);
-        float3 spec = F * (G * VoH / fmaxf(NoV * NoH, 1e-6f));
+        float3 spec = F * (G1L * VoH / fmaxf(NoV * NoH, 1e-6f));
         prd.origin = P + Ng * 1e-3f;
         prd.direction = newDir;
         prd.throughput = mul(prd.throughput, spec / spec_prob);
-        prd.prev_pdf_valid = 0;
+        prd.prev_pdf_bsdf = pdf * spec_prob;
+        prd.prev_pdf_valid = 1;
     } else {
         float r1 = rnd(seed);
         float r2 = rnd(seed);
@@ -590,16 +590,16 @@ extern "C" __global__ void __closesthit__ch_bayer()
         float NoV = fmaxf(dot(Ng, V), 0.0f);
         float VoH = fmaxf(dot(V, H), 0.0f);
         float NoH = fmaxf(dot(Ng, H), 0.0f);
-        float k = (alpha + 1.0f) * (alpha + 1.0f) * 0.125f;
-        float G1V = NoV / (NoV * (1.0f - k) + k);
-        float G1L = NoL / (NoL * (1.0f - k) + k);
-        float G = G1V * G1L;
+        float alpha2 = alpha * alpha;
+        float G1L = 2.0f * NoL /
+                    (NoL + sqrtf(alpha2 + (1.0f - alpha2) * NoL * NoL));
         float F = f0 + (1.0f - f0) * powf(fmaxf(0.0f, 1.0f - VoH), 5.0f);
-        float spec = F * (G * VoH / fmaxf(NoV * NoH, 1e-6f));
+        float spec = F * (G1L * VoH / fmaxf(NoV * NoH, 1e-6f));
         prd.origin = P + Ng * 1e-3f;
         prd.direction = newDir;
         prd.throughput *= spec / spec_prob;
-        prd.prev_pdf_valid = 0;
+        prd.prev_pdf_bsdf = pdf * spec_prob;
+        prd.prev_pdf_valid = 1;
     } else {
         float r1 = rnd(seed);
         float r2 = rnd(seed);
