@@ -43,8 +43,13 @@ __constant__ Params params;
 // SBT data for each primitive
 struct HitgroupData
 {
-  float3 kd; // diffuse reflectance
-  float3 ke; // emission
+  float3 Base_colour;
+  float  Metallic;
+  float  Roughness;
+  float  IOR;
+  float  Alpha;
+  float  Transmission;
+  float3 Emission;
 };
 
 enum {
@@ -290,8 +295,8 @@ extern "C" __global__ void __closesthit__ch()
 
     // Fetch per-triangle materials from SBT
     const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());
-    const float3 kd = hg->kd;
-    const float3 ke = hg->ke;
+    const float3 Base_colour = hg->Base_colour;
+    const float3 Emission = hg->Emission;
 
     // Sample direct illumination from rectangular area light
     unsigned long long& seed = prd.seed;
@@ -328,7 +333,7 @@ extern "C" __global__ void __closesthit__ch()
                 float pdf_light = pdf_area * dist2 / cosL;
                 float pdf_bsdf = cosS * (1.0f / CUDART_PI_F);
                 float w = pdf_light / (pdf_light + pdf_bsdf);
-                float3 f = kd * (1.0f / CUDART_PI_F);
+                float3 f = Base_colour * (1.0f / CUDART_PI_F);
                 float3 contrib = params.light_emit * f * (cosS * cosL / dist2) / pdf_area;
                 Lo += contrib * w;
             }
@@ -336,8 +341,8 @@ extern "C" __global__ void __closesthit__ch()
     }
 
     // Accumulate emission with MIS and direct light
-    float3 emission = ke;
-    if (prd.prev_pdf_valid && (ke.x > 0.0f || ke.y > 0.0f || ke.z > 0.0f)) {
+    float3 emission = Emission;
+    if (prd.prev_pdf_valid && (Emission.x > 0.0f || Emission.y > 0.0f || Emission.z > 0.0f)) {
         float3 L = P - prd.origin;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float area = 4.0f * params.light_half.x * params.light_half.y;
@@ -363,7 +368,7 @@ extern "C" __global__ void __closesthit__ch()
 
     prd.origin = P + Ng * 1e-3f;
     prd.direction = newDir;
-    prd.throughput = mul(prd.throughput, kd);
+    prd.throughput = mul(prd.throughput, Base_colour);
     prd.prev_pdf_bsdf = cosTheta * (1.0f / CUDART_PI_F);
     prd.prev_pdf_valid = 1;
 
@@ -405,12 +410,12 @@ extern "C" __global__ void __closesthit__ch_bayer()
     const float3 Ng = normalize3(reinterpret_cast<const float3*>(params.d_normals)[prim]);
 
     const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());
-    const float3 kd = hg->kd;
-    const float3 ke = hg->ke;
+    const float3 Base_colour = hg->Base_colour;
+    const float3 Emission = hg->Emission;
 
     const int ch = prd.ch;
-    float albedo = select(kd, ch);
-    float emission = select(ke, ch);
+    float albedo = select(Base_colour, ch);
+    float emission = select(Emission, ch);
 
     unsigned long long& seed = prd.seed;
     float Lo = 0.0f;

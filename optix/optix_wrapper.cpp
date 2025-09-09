@@ -147,8 +147,13 @@ struct alignas( OPTIX_SBT_RECORD_ALIGNMENT ) SbtRecord
 struct EmptyData {};
 
 struct HitData {
-  float3 kd;
-  float3 ke;
+  float3 Base_colour;
+  float  Metallic;
+  float  Roughness;
+  float  IOR;
+  float  Alpha;
+  float  Transmission;
+  float3 Emission;
 };
 
 // Host/device params must match the device-side struct layout.
@@ -235,9 +240,14 @@ struct State
   std::vector<float3> vertices;
   std::vector<uint3>  indices;
   std::vector<float3> normals;
-  // Per-triangle diffuse/emissive colors used when building SBT records.
-  std::vector<float3> kd;
-  std::vector<float3> ke;
+  // Per-triangle material parameters used when building SBT records.
+  std::vector<float3> Base_colour;
+  std::vector<float>  Metallic;
+  std::vector<float>  Roughness;
+  std::vector<float>  IOR;
+  std::vector<float>  Alpha;
+  std::vector<float>  Transmission;
+  std::vector<float3> Emission;
   // Per-triangle SBT indices for associating primitives with records.
   std::vector<uint32_t> sbt_index;
 
@@ -321,13 +331,26 @@ static void addQuad(std::vector<float3>& V, std::vector<uint3>& I,
 
 static void buildCornell(State& s)
 {
-  s.vertices.clear(); s.indices.clear(); s.normals.clear(); s.kd.clear(); s.ke.clear(); s.sbt_index.clear();
+  s.vertices.clear(); s.indices.clear(); s.normals.clear();
+  s.Base_colour.clear(); s.Metallic.clear(); s.Roughness.clear();
+  s.IOR.clear(); s.Alpha.clear(); s.Transmission.clear(); s.Emission.clear();
+  s.sbt_index.clear();
 
   const float3 red   = make_float3(0.49f, 0.056f, 0.016f);
   const float3 green = make_float3(0.272f, 0.733f, 0.088f);
   const float3 white = make_float3(0.789f,0.801f,0.800f);
   const float3 black = make_float3(0,0,0);
   const float3 emit  = make_float3(15.f, 15.f, 15.f);
+
+  auto push_material = [&](const float3& base, const float3& emit_c){
+    s.Base_colour.push_back(base); s.Base_colour.push_back(base);
+    s.Metallic.push_back(0.f); s.Metallic.push_back(0.f);
+    s.Roughness.push_back(0.f); s.Roughness.push_back(0.f);
+    s.IOR.push_back(1.5f); s.IOR.push_back(1.5f);
+    s.Alpha.push_back(1.f); s.Alpha.push_back(1.f);
+    s.Transmission.push_back(0.f); s.Transmission.push_back(0.f);
+    s.Emission.push_back(emit_c); s.Emission.push_back(emit_c);
+  };
 
   // room bounds (NVIDIA-style Cornell; z=up)
   const float3 A = make_float3(-1.0f, -1.0f, 0.0f); // floor corners
@@ -342,28 +365,23 @@ static void buildCornell(State& s)
 
   // floor (white)
   addQuad(s.vertices, s.indices, A,B,C,D);
-  s.kd.push_back(white); s.kd.push_back(white);
-  s.ke.push_back(black); s.ke.push_back(black);
+  push_material(white, black);
 
   // ceiling (white)
   addQuad(s.vertices, s.indices, Du,Cu,Bu,Au);
-  s.kd.push_back(white); s.kd.push_back(white);
-  s.ke.push_back(black); s.ke.push_back(black);
+  push_material(white, black);
 
   // back wall (white)
   addQuad(s.vertices, s.indices, A,Au,Bu,B);
-  s.kd.push_back(white); s.kd.push_back(white);
-  s.ke.push_back(black); s.ke.push_back(black);
+  push_material(white, black);
 
   // right wall (green)
-  addQuad(s.vertices, s.indices, B,Bu,Cu,C);
-  s.kd.push_back(green); s.kd.push_back(green);
-  s.ke.push_back(black); s.ke.push_back(black);
+  addQuad(s.vertices, s.indices, D,Du,Au,A);
+  push_material(green, black);
 
   // left wall (red)
-  addQuad(s.vertices, s.indices, D,Du,Au,A);
-  s.kd.push_back(red); s.kd.push_back(red);
-  s.ke.push_back(black); s.ke.push_back(black);
+  addQuad(s.vertices, s.indices, B,Bu,Cu,C);
+  push_material(red, black);
 
   // ceiling light cutout (small rectangle) — make it emissive
   const float3 L0 = make_float3(-0.3f, -0.3f, 1.999f);
@@ -371,8 +389,7 @@ static void buildCornell(State& s)
   const float3 L2 = make_float3( 0.3f,  0.3f, 1.999f);
   const float3 L3 = make_float3(-0.3f,  0.3f, 1.999f);
   addQuad(s.vertices, s.indices, L3,L2,L1,L0);
-  s.kd.push_back(white); s.kd.push_back(white);
-  s.ke.push_back(emit);  s.ke.push_back(emit);
+  push_material(white, emit);
 
   // optional: a short box (white)
   {
@@ -389,8 +406,7 @@ static void buildCornell(State& s)
 
     auto addRect = [&](float3 a,float3 b,float3 c,float3 d){
       addQuad(s.vertices, s.indices, a,b,c,d);
-      s.kd.push_back(white); s.kd.push_back(white);
-      s.ke.push_back(black); s.ke.push_back(black);
+      push_material(white, black);
     };
     addRect(p3,p2,p1,p0); // bottom
     addRect(q0,q1,q2,q3); // top
@@ -635,21 +651,41 @@ static void createPipeline(State& s)
   for (uint32_t i = 0; i < num_tris; ++i) {
     HitgroupRecord& rec_rad = s.hg_rec_rgb[i * RAY_TYPE_COUNT + RAY_RADIANCE];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_rad, &rec_rad));
-    rec_rad.data.kd = s.kd[i];
-    rec_rad.data.ke = s.ke[i];
+    rec_rad.data.Base_colour = s.Base_colour[i];
+    rec_rad.data.Metallic = s.Metallic[i];
+    rec_rad.data.Roughness = s.Roughness[i];
+    rec_rad.data.IOR = s.IOR[i];
+    rec_rad.data.Alpha = s.Alpha[i];
+    rec_rad.data.Transmission = s.Transmission[i];
+    rec_rad.data.Emission = s.Emission[i];
     HitgroupRecord& rec_sh = s.hg_rec_rgb[i * RAY_TYPE_COUNT + RAY_SHADOW];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_sh, &rec_sh));
-    rec_sh.data.kd = make_float3(0.f,0.f,0.f);
-    rec_sh.data.ke = make_float3(0.f,0.f,0.f);
+    rec_sh.data.Base_colour = make_float3(0.f,0.f,0.f);
+    rec_sh.data.Metallic = 0.f;
+    rec_sh.data.Roughness = 0.f;
+    rec_sh.data.IOR = 0.f;
+    rec_sh.data.Alpha = 0.f;
+    rec_sh.data.Transmission = 0.f;
+    rec_sh.data.Emission = make_float3(0.f,0.f,0.f);
 
     HitgroupRecord& rec_rad_b = s.hg_rec_bayer[i * RAY_TYPE_COUNT + RAY_RADIANCE];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_rad_bayer, &rec_rad_b));
-    rec_rad_b.data.kd = s.kd[i];
-    rec_rad_b.data.ke = s.ke[i];
+    rec_rad_b.data.Base_colour = s.Base_colour[i];
+    rec_rad_b.data.Metallic = s.Metallic[i];
+    rec_rad_b.data.Roughness = s.Roughness[i];
+    rec_rad_b.data.IOR = s.IOR[i];
+    rec_rad_b.data.Alpha = s.Alpha[i];
+    rec_rad_b.data.Transmission = s.Transmission[i];
+    rec_rad_b.data.Emission = s.Emission[i];
     HitgroupRecord& rec_sh_b = s.hg_rec_bayer[i * RAY_TYPE_COUNT + RAY_SHADOW];
     OTK_CHECK(optixSbtRecordPackHeader(s.pg_hit_sh, &rec_sh_b));
-    rec_sh_b.data.kd = make_float3(0.f,0.f,0.f);
-    rec_sh_b.data.ke = make_float3(0.f,0.f,0.f);
+    rec_sh_b.data.Base_colour = make_float3(0.f,0.f,0.f);
+    rec_sh_b.data.Metallic = 0.f;
+    rec_sh_b.data.Roughness = 0.f;
+    rec_sh_b.data.IOR = 0.f;
+    rec_sh_b.data.Alpha = 0.f;
+    rec_sh_b.data.Transmission = 0.f;
+    rec_sh_b.data.Emission = make_float3(0.f,0.f,0.f);
   }
 
   CUdeviceptr d_rg_rgb=0, d_rg_bayer=0;
