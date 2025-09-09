@@ -4,7 +4,7 @@ project(optix_host LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 # Allow users to provide OPTIX_ROOT via the cache or environment.
-set(OPTIX_ROOT "" CACHE PATH "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0")
+set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0")
 
 # Expose tunables for register usage and stack sizing.
 # Use CACHE STRING so the values are passed verbatim instead of "ON"/"OFF".
