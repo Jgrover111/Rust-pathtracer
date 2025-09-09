@@ -370,9 +370,12 @@ extern "C" __global__ void __closesthit__ch()
     float f0 = (IOR - 1.0f) / (IOR + 1.0f);
     f0 = f0 * f0;
     float3 F0 = make3(f0);
-    float spec_prob = fminf(0.99f, fmaxf(0.01f, (F0.x + F0.y + F0.z) * (1.0f / 3.0f)));
+    float3 V = -prd.direction;
+    float NoV = fmaxf(dot(Ng, V), 0.0f);
+    float3 F = fresnel_schlick(NoV, F0);
+    float spec_prob = fminf(0.99f, fmaxf(0.01f, (F.x + F.y + F.z) * (1.0f / 3.0f)));
     float diff_prob = 1.0f - spec_prob;
-    float3 kd = Base_colour * (1.0f - f0);
+    float3 kd = Base_colour * (make3(1.0f) - F);
 
     // Sample direct illumination from rectangular area light
     unsigned long long& seed = prd.seed;
@@ -385,9 +388,8 @@ extern "C" __global__ void __closesthit__ch()
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float dist = sqrtf(dist2);
         float3 wi = L / dist;
-        float3 light_n = make_float3(0.0f, 0.0f, -1.0f);
         float cosS = fmaxf(0.0f, dot(Ng, wi));
-        float cosL = fmaxf(0.0f, dot(params.light_normal, wi * -1.0f));
+        float cosL = fmaxf(0.0f, dot(params.light_normal, -wi));
         if (cosS > 0.0f && cosL > 0.0f) {
             unsigned int occluded = 0u;
             optixTrace(
@@ -404,12 +406,28 @@ extern "C" __global__ void __closesthit__ch()
                 RAY_TYPE_SHADOW,
                 occluded);
             if (!occluded) {
+                float3 V = -prd.direction;
+                float3 H = normalize3(V + wi);
+                float VoH = fmaxf(dot(V, H), 0.0f);
+                float NoH = fmaxf(dot(Ng, H), 0.0f);
+                float alpha = fmaxf(Roughness * Roughness, 1e-4f);
+                float alpha2 = alpha * alpha;
+                float denom = NoH * NoH * (alpha2 - 1.0f) + 1.0f;
+                float D = alpha2 / (CUDART_PI_F * denom * denom);
+                float G1V = 2.0f * NoV /
+                             (NoV + sqrtf(alpha2 + (1.0f - alpha2) * NoV * NoV));
+                float G1L = 2.0f * cosS /
+                             (cosS + sqrtf(alpha2 + (1.0f - alpha2) * cosS * cosS));
+                float3 F = fresnel_schlick(VoH, F0);
+                float3 f_spec = F * (D * G1V * G1L / fmaxf(4.0f * NoV * cosS, 1e-6f));
+                float pdf_spec = D * NoH * G1V / fmaxf(4.0f * VoH, 1e-6f) * spec_prob;
+                float pdf_diff = cosS * (1.0f / CUDART_PI_F) * diff_prob;
+                float pdf_bsdf = pdf_spec + pdf_diff;
                 float area = 4.0f * params.light_half.x * params.light_half.y;
                 float pdf_area = 1.0f / area;
                 float pdf_light = pdf_area * dist2 / cosL;
-                float pdf_bsdf = cosS * (1.0f / CUDART_PI_F) * diff_prob;
                 float w = pdf_light / (pdf_light + pdf_bsdf);
-                float3 f = kd * (1.0f / CUDART_PI_F);
+                float3 f = kd * (1.0f / CUDART_PI_F) + f_spec;
                 float3 contrib = params.light_emit * f * (cosS * cosL / dist2) / pdf_area;
                 Lo += contrib * w;
             }
@@ -422,8 +440,7 @@ extern "C" __global__ void __closesthit__ch()
         float3 L = P - prd.origin;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float area = 4.0f * params.light_half.x * params.light_half.y;
-        float3 light_n = make_float3(0.0f, 0.0f, -1.0f);
-        float cosL = fmaxf(0.0f, dot(params.light_normal, prd.direction * -1.0f));
+        float cosL = fmaxf(0.0f, dot(params.light_normal, -prd.direction));
         float pdf_light = dist2 / (cosL * area);
         float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
         emission = emission * w_bsdf;
@@ -444,13 +461,17 @@ extern "C" __global__ void __closesthit__ch()
         float VoH = fmaxf(dot(V, H), 0.0f);
         float NoH = fmaxf(dot(Ng, H), 0.0f);
         float alpha2 = alpha * alpha;
+        float denom = NoH * NoH * (alpha2 - 1.0f) + 1.0f;
+        float D = alpha2 / (CUDART_PI_F * denom * denom);
+        float G1V = 2.0f * NoV /
+                     (NoV + sqrtf(alpha2 + (1.0f - alpha2) * NoV * NoV));
         float G1L = 2.0f * NoL /
                     (NoL + sqrtf(alpha2 + (1.0f - alpha2) * NoL * NoL));
         float3 F = fresnel_schlick(VoH, F0);
-        float3 spec = F * (G1L * VoH / fmaxf(NoV * NoH, 1e-6f));
+        float3 spec_brdf = F * (D * G1V * G1L / fmaxf(4.0f * NoV * NoL, 1e-6f));
         prd.origin = P + Ng * 1e-3f;
         prd.direction = newDir;
-        prd.throughput = mul(prd.throughput, spec / spec_prob);
+        prd.throughput = mul(prd.throughput, spec_brdf * NoL / fmaxf(pdf * spec_prob, 1e-6f));
         prd.prev_pdf_bsdf = pdf * spec_prob;
         prd.prev_pdf_valid = 1;
     } else {
@@ -521,9 +542,12 @@ extern "C" __global__ void __closesthit__ch_bayer()
 
     float f0 = (IOR - 1.0f) / (IOR + 1.0f);
     f0 = f0 * f0;
-    float spec_prob = fminf(0.99f, fmaxf(0.01f, f0));
+    float3 V = -prd.direction;
+    float NoV = fmaxf(dot(Ng, V), 0.0f);
+    float Fr = f0 + (1.0f - f0) * powf(fmaxf(0.0f, 1.0f - NoV), 5.0f);
+    float spec_prob = fminf(0.99f, fmaxf(0.01f, Fr));
     float diff_prob = 1.0f - spec_prob;
-    float kd = albedo * (1.0f - f0);
+    float kd = albedo * (1.0f - Fr);
 
     unsigned long long& seed = prd.seed;
     float Lo = 0.0f;
@@ -536,7 +560,7 @@ extern "C" __global__ void __closesthit__ch_bayer()
         float dist = sqrtf(dist2);
         float3 wi = L / dist;
         float cosS = fmaxf(0.0f, dot(Ng, wi));
-        float cosL = fmaxf(0.0f, dot(params.light_normal, wi * -1.0f));
+        float cosL = fmaxf(0.0f, dot(params.light_normal, -wi));
         if (cosS > 0.0f && cosL > 0.0f) {
             unsigned int occluded = 0u;
             optixTrace(
@@ -553,12 +577,28 @@ extern "C" __global__ void __closesthit__ch_bayer()
                 RAY_TYPE_SHADOW,
                 occluded);
             if (!occluded) {
+                float3 Vv = -prd.direction;
+                float3 H = normalize3(Vv + wi);
+                float VoH = fmaxf(dot(Vv, H), 0.0f);
+                float NoH = fmaxf(dot(Ng, H), 0.0f);
+                float alpha = fmaxf(Roughness * Roughness, 1e-4f);
+                float alpha2 = alpha * alpha;
+                float denom = NoH * NoH * (alpha2 - 1.0f) + 1.0f;
+                float D = alpha2 / (CUDART_PI_F * denom * denom);
+                float G1V = 2.0f * NoV /
+                             (NoV + sqrtf(alpha2 + (1.0f - alpha2) * NoV * NoV));
+                float G1L = 2.0f * cosS /
+                             (cosS + sqrtf(alpha2 + (1.0f - alpha2) * cosS * cosS));
+                float F = f0 + (1.0f - f0) * powf(fmaxf(0.0f, 1.0f - VoH), 5.0f);
+                float f_spec = F * (D * G1V * G1L / fmaxf(4.0f * NoV * cosS, 1e-6f));
+                float pdf_spec = D * NoH * G1V / fmaxf(4.0f * VoH, 1e-6f) * spec_prob;
+                float pdf_diff = cosS * (1.0f / CUDART_PI_F) * diff_prob;
+                float pdf_bsdf = pdf_spec + pdf_diff;
                 float area = 4.0f * params.light_half.x * params.light_half.y;
                 float pdf_area = 1.0f / area;
                 float pdf_light = pdf_area * dist2 / cosL;
-                float pdf_bsdf = cosS * (1.0f / CUDART_PI_F) * diff_prob;
                 float w = pdf_light / (pdf_light + pdf_bsdf);
-                float f = kd * (1.0f / CUDART_PI_F);
+                float f = kd * (1.0f / CUDART_PI_F) + f_spec;
                 float Le = select(params.light_emit, ch);
                 float contrib = Le * f * (cosS * cosL / dist2) / pdf_area;
                 Lo += contrib * w;
@@ -570,7 +610,7 @@ extern "C" __global__ void __closesthit__ch_bayer()
         float3 L = P - prd.origin;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float area = 4.0f * params.light_half.x * params.light_half.y;
-        float cosL = fmaxf(0.0f, dot(params.light_normal, prd.direction * -1.0f));
+        float cosL = fmaxf(0.0f, dot(params.light_normal, -prd.direction));
         float pdf_light = dist2 / (cosL * area);
         float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
         emission *= w_bsdf;
@@ -591,13 +631,19 @@ extern "C" __global__ void __closesthit__ch_bayer()
         float VoH = fmaxf(dot(V, H), 0.0f);
         float NoH = fmaxf(dot(Ng, H), 0.0f);
         float alpha2 = alpha * alpha;
+        float denom = NoH * NoH * (alpha2 - 1.0f) + 1.0f;
+        float D = alpha2 / (CUDART_PI_F * denom * denom);
+        float G1V = 2.0f * NoV /
+                     (NoV + sqrtf(alpha2 + (1.0f - alpha2) * NoV * NoV));
         float G1L = 2.0f * NoL /
                     (NoL + sqrtf(alpha2 + (1.0f - alpha2) * NoL * NoL));
         float F = f0 + (1.0f - f0) * powf(fmaxf(0.0f, 1.0f - VoH), 5.0f);
-        float spec = F * (G1L * VoH / fmaxf(NoV * NoH, 1e-6f));
+        float spec_brdf = F * (D * G1V * G1L / fmaxf(4.0f * NoV * NoL, 1e-6f));
         prd.origin = P + Ng * 1e-3f;
         prd.direction = newDir;
-        prd.throughput *= spec / spec_prob;
+        prd.throughput *= spec_brdf * NoL / fmaxf(pdf * spec_prob, 1e-6f);
+        prd.prev_pdf_bsdf = pdf * spec_prob;
+        prd.prev_pdf_valid = 1;
         prd.prev_pdf_bsdf = pdf * spec_prob;
         prd.prev_pdf_valid = 1;
     } else {
