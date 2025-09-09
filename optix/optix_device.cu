@@ -299,12 +299,12 @@ extern "C" __global__ void __closesthit__ch()
     {
         float u = (rnd(seed) * 2.0f - 1.0f) * params.light_half.x;
         float v = (rnd(seed) * 2.0f - 1.0f) * params.light_half.y;
-        float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y, params.light_pos.z + v);
+        float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y + v, params.light_pos.z);
         float3 L = lp - P;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float dist = sqrtf(dist2);
         float3 wi = L / dist;
-        float3 light_n = make_float3(0.0f, -1.0f, 0.0f);
+        float3 light_n = make_float3(0.0f, 0.0f, -1.0f);
         float cosS = fmaxf(0.0f, dot(Ng, wi));
         float cosL = fmaxf(0.0f, dot(params.light_normal, wi * -1.0f));
         if (cosS > 0.0f && cosL > 0.0f) {
@@ -341,7 +341,7 @@ extern "C" __global__ void __closesthit__ch()
         float3 L = P - prd.origin;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float area = 4.0f * params.light_half.x * params.light_half.y;
-        float3 light_n = make_float3(0.0f, -1.0f, 0.0f);
+        float3 light_n = make_float3(0.0f, 0.0f, -1.0f);
         float cosL = fmaxf(0.0f, dot(params.light_normal, prd.direction * -1.0f));
         float pdf_light = dist2 / (cosL * area);
         float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
@@ -417,7 +417,7 @@ extern "C" __global__ void __closesthit__ch_bayer()
     {
         float u = (rnd(seed) * 2.0f - 1.0f) * params.light_half.x;
         float v = (rnd(seed) * 2.0f - 1.0f) * params.light_half.y;
-        float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y, params.light_pos.z + v);
+        float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y + v, params.light_pos.z);
         float3 L = lp - P;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
         float dist = sqrtf(dist2);

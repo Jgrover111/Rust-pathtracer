@@ -329,63 +329,63 @@ static void buildCornell(State& s)
   const float3 black = make_float3(0,0,0);
   const float3 emit  = make_float3(15.f, 15.f, 15.f);
 
-  // room bounds (NVIDIA-style Cornell; y=up)
-  const float3 A = make_float3(-1.0f, 0.0f, -1.0f); // floor corners
-  const float3 B = make_float3( 1.0f, 0.0f, -1.0f);
-  const float3 C = make_float3( 1.0f, 0.0f,  1.0f);
-  const float3 D = make_float3(-1.0f, 0.0f,  1.0f);
+  // room bounds (NVIDIA-style Cornell; z=up)
+  const float3 A = make_float3(-1.0f, -1.0f, 0.0f); // floor corners
+  const float3 B = make_float3( 1.0f, -1.0f, 0.0f);
+  const float3 C = make_float3( 1.0f,  1.0f, 0.0f);
+  const float3 D = make_float3(-1.0f,  1.0f, 0.0f);
 
-  const float3 Au = make_float3(-1.0f, 2.0f, -1.0f); // ceiling corners
-  const float3 Bu = make_float3( 1.0f, 2.0f, -1.0f);
-  const float3 Cu = make_float3( 1.0f, 2.0f,  1.0f);
-  const float3 Du = make_float3(-1.0f, 2.0f,  1.0f);
+  const float3 Au = make_float3(-1.0f, -1.0f, 2.0f); // ceiling corners
+  const float3 Bu = make_float3( 1.0f, -1.0f, 2.0f);
+  const float3 Cu = make_float3( 1.0f,  1.0f, 2.0f);
+  const float3 Du = make_float3(-1.0f,  1.0f, 2.0f);
 
   // floor (white)
-  addQuad(s.vertices, s.indices, D,C,B,A);
+  addQuad(s.vertices, s.indices, A,B,C,D);
   s.kd.push_back(white); s.kd.push_back(white);
   s.ke.push_back(black); s.ke.push_back(black);
 
   // ceiling (white)
-  addQuad(s.vertices, s.indices, Au,Bu,Cu,Du);
+  addQuad(s.vertices, s.indices, Du,Cu,Bu,Au);
   s.kd.push_back(white); s.kd.push_back(white);
   s.ke.push_back(black); s.ke.push_back(black);
 
   // back wall (white)
-  addQuad(s.vertices, s.indices, B,Bu,Au,A);
+  addQuad(s.vertices, s.indices, A,Au,Bu,B);
   s.kd.push_back(white); s.kd.push_back(white);
   s.ke.push_back(black); s.ke.push_back(black);
 
   // right wall (green)
-  addQuad(s.vertices, s.indices, C,Cu,Bu,B);
+  addQuad(s.vertices, s.indices, B,Bu,Cu,C);
   s.kd.push_back(green); s.kd.push_back(green);
   s.ke.push_back(black); s.ke.push_back(black);
 
   // left wall (red)
-  addQuad(s.vertices, s.indices, A,Au,Du,D);
+  addQuad(s.vertices, s.indices, D,Du,Au,A);
   s.kd.push_back(red); s.kd.push_back(red);
   s.ke.push_back(black); s.ke.push_back(black);
 
   // ceiling light cutout (small rectangle) — make it emissive
-  const float3 L0 = make_float3(-0.3f, 1.999f, -0.3f);
-  const float3 L1 = make_float3( 0.3f, 1.999f, -0.3f);
-  const float3 L2 = make_float3( 0.3f, 1.999f,  0.3f);
-  const float3 L3 = make_float3(-0.3f, 1.999f,  0.3f);
-  addQuad(s.vertices, s.indices, L0,L1,L2,L3);
+  const float3 L0 = make_float3(-0.3f, -0.3f, 1.999f);
+  const float3 L1 = make_float3( 0.3f, -0.3f, 1.999f);
+  const float3 L2 = make_float3( 0.3f,  0.3f, 1.999f);
+  const float3 L3 = make_float3(-0.3f,  0.3f, 1.999f);
+  addQuad(s.vertices, s.indices, L3,L2,L1,L0);
   s.kd.push_back(white); s.kd.push_back(white);
   s.ke.push_back(emit);  s.ke.push_back(emit);
 
   // optional: a short box (white)
   {
-    float y0 = 0.001f, y1 = 0.6f;
-    float3 p0 = make_float3(-0.424f, y0, 0.0f);
-    float3 p1 = make_float3(0.0f, y0, -0.424f);
-    float3 p2 = make_float3(0.424f, y0, 0.0f);
-    float3 p3 = make_float3(0.0f, y0, 0.424f);
+    float z0 = 0.00f, z1 = 0.6f;
+    float3 p0 = make_float3(-0.424f,  0.0f, z0);
+    float3 p1 = make_float3( 0.0f, -0.424f, z0);
+    float3 p2 = make_float3( 0.424f, 0.0f, z0);
+    float3 p3 = make_float3( 0.0f,  0.424f, z0);
 
-    float3 q0 = make_float3(-0.424f, y1, 0.0f);
-    float3 q1 = make_float3(0.0f, y1, -0.424f);
-    float3 q2 = make_float3(0.424f, y1, 0.0f);
-    float3 q3 = make_float3(0.0f, y1, 0.424f);
+    float3 q0 = make_float3(-0.424f,  0.0f, z1);
+    float3 q1 = make_float3( 0.0f, -0.424f, z1);
+    float3 q2 = make_float3( 0.424f, 0.0f, z1);
+    float3 q3 = make_float3( 0.0f,  0.424f, z1);
 
     auto addRect = [&](float3 a,float3 b,float3 c,float3 d){
       addQuad(s.vertices, s.indices, a,b,c,d);
@@ -393,11 +393,11 @@ static void buildCornell(State& s)
       s.ke.push_back(black); s.ke.push_back(black);
     };
     addRect(p3,p2,p1,p0); // bottom
-    addRect(q3,q2,q1,q0); // top
-    addRect(p1,p0,q0,q1);
-    addRect(p2,p1,q1,q2);
-    addRect(p3,p2,q2,q3);
-    addRect(p0,p3,q3,q0);
+    addRect(q0,q1,q2,q3); // top
+    addRect(p0,p1,q1,q0);
+    addRect(p1,p2,q2,q1);
+    addRect(p2,p3,q3,q2);
+    addRect(p3,p0,q0,q3);
   }
 
   // compute per-triangle normals
@@ -722,10 +722,10 @@ static State* make_state(uint32_t W, uint32_t H)
 
   st->width = W; st->height = H;
 
-  // default cam looking into the box
-  float3 eye    = make_float3(0.0f, 1.0f, 3.0f);
-  float3 lookat = make_float3(0.0f, 1.0f, 0.0f);
-  float3 up     = make_float3(0.0f, 1.0f, 0.0f);
+  // default cam looking into the box (Blender-style Z-up)
+  float3 eye    = make_float3(0.0f, 3.0f, 1.0f);
+  float3 lookat = make_float3(0.0f, 0.0f, 1.0f);
+  float3 up     = make_float3(0.0f, 0.0f, 1.0f);
   float fovY    = 45.0f * float(M_PI) / 180.0f;
   float3 Wv = normalize3( make_float3(lookat.x-eye.x, lookat.y-eye.y, lookat.z-eye.z) );
   float3 Uv = normalize3( cross3(Wv, up) );
@@ -751,9 +751,9 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.d_vertices = st->d_vertices;
   st->h_params.d_indices  = st->d_indices;
   st->h_params.d_normals  = st->d_normals;
-  st->h_params.light_pos  = make_float3(0.f, 1.99f, 0.f);
+  st->h_params.light_pos  = make_float3(0.f, 0.f, 1.99f);
   st->h_params.light_emit = make_float3(15.f, 15.f, 15.f); // match emissive ceiling light
-  st->h_params.light_normal = normalize3(make_float3(0.f, -1.f, 0.f));
+  st->h_params.light_normal = normalize3(make_float3(0.f, 0.f, -1.f));
   st->h_params.light_half = make_float2(0.3f, 0.3f);
 
   // pipeline
@@ -941,9 +941,9 @@ static void ensure_handle(int w, int h)
         g_last_w = w; g_last_h = h;
         // Set a simple default camera once (tweak if you like)
         optix_ctx_set_camera(g_handle,
-                             0.f, 1.f, 3.f,
-                             0.f, 1.f, 0.f,
-                             0.f, 1.f, 0.f,
+                             0.f, 3.f, 1.f,
+                             0.f, 0.f, 1.f,
+                             0.f, 0.f, 1.f,
                              45.f);
     }
 }
