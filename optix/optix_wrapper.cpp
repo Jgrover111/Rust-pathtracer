@@ -160,6 +160,7 @@ struct Params
   int         width;
   int         height;
   int         spp;
+  int         max_depth;
   int         frame;
   int         bayer_pattern;  // 0..3
 
@@ -772,6 +773,7 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.width     = W;
   st->h_params.height    = H;
   st->h_params.spp     = 1;
+  st->h_params.max_depth = 5;
   st->h_params.frame     = 0;
   st->h_params.bayer_pattern = 0;
 
@@ -840,14 +842,15 @@ void  optix_ctx_set_camera(void* handle,
   CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
 }
 
-static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
+static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float* out_rgb)
 {
     if (!out_rgb) return -1;
     // same pattern you use elsewhere: update Params on device, launch, copy back
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
-        s.h_params.spp = spp;
+    s.h_params.spp = spp;
+    s.h_params.max_depth = max_depth;
     // If your renderer needs any per-frame fields set, do it here.
     // e.g., s.h_params.bayer_pattern = s.bayer_pattern;   // (RGB path usually not needed)
 
@@ -883,13 +886,14 @@ static int optix_ctx_render_rgb(void* handle, int spp, float* out_rgb)
     return 0;
 }
 
-static int optix_ctx_render_bayer_f32(void* handle, int spp, float* out_raw)
+static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, float* out_raw)
 {
     if (!out_raw) return -1;
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
     s.h_params.spp = spp;
+    s.h_params.max_depth = max_depth;
     s.h_params.bayer_pattern = s.bayer_pattern;  // keep whatever you already store in s.bayer_pattern
     CU_CHECK( cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream) );
     // Disable RGB output for this launch by zeroing the device-side pointer.
@@ -945,18 +949,18 @@ static void ensure_handle(int w, int h)
 }
 
 extern "C" __declspec(dllexport)
-int optix_render_rgb(int w, int h, int spp, float* out_rgb)
+int optix_render_rgb(int w, int h, int spp, int max_depth, float* out_rgb)
 {
     ensure_handle(w, h);
-    return optix_ctx_render_rgb(g_handle, spp, out_rgb);
+    return optix_ctx_render_rgb(g_handle, spp, max_depth, out_rgb);
 }
 
 extern "C" __declspec(dllexport)
-int optix_render_bayer_f32(int w, int h, int spp, int pat, float* out_raw)
+int optix_render_bayer_f32(int w, int h, int spp, int max_depth, int pat, float* out_raw)
 {
     ensure_handle(w, h);
     optix_ctx_set_bayer(g_handle, pat);
-    return optix_ctx_render_bayer_f32(g_handle, spp, out_raw);
+    return optix_ctx_render_bayer_f32(g_handle, spp, max_depth, out_raw);
 }
 extern "C" __declspec(dllexport)
 void optix_synchronize()

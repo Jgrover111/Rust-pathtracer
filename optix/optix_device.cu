@@ -14,6 +14,7 @@ struct Params
   int                      width;
   int                      height;
   int                      spp;
+  int                      max_depth;
   int                      frame;
   int                      bayer_pattern; // 0:RGGB,1:BGGR,2:GRBG,3:GBRG
   float3                   cam_eye;
@@ -367,11 +368,11 @@ extern "C" __global__ void __closesthit__ch()
     prd.prev_pdf_valid = 1;
 
     prd.depth++;
-    if (prd.depth >= 5) {
+    if (prd.depth >= params.max_depth) {
         prd.done = 1;
         return;
     }
-    if (prd.depth >= 3) {
+    if (prd.depth >= params.max_depth - 2) {
         float p = fmaxf(prd.throughput.x, fmaxf(prd.throughput.y, prd.throughput.z));
         if (rnd(seed) > p) {
             prd.done = 1;
@@ -481,11 +482,11 @@ extern "C" __global__ void __closesthit__ch_bayer()
     prd.prev_pdf_valid = 1;
 
     prd.depth++;
-    if (prd.depth >= 5) {
+    if (prd.depth >= params.max_depth) {
         prd.done = 1;
         return;
     }
-    if (prd.depth >= 3) {
+    if (prd.depth >= params.max_depth - 2) {
         float p = fminf(0.95f, fmaxf(0.05f, prd.throughput));
         if (rnd(seed) > p) {
             prd.done = 1;

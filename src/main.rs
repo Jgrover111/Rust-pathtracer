@@ -11,11 +11,18 @@ use std::time::Instant;
 
 // ---- FFI ----------------------------------------------------------
 extern "C" {
-    fn optix_render_rgb(w: c_int, h: c_int, spp: c_int, out_rgb: *mut f32) -> c_int;
+    fn optix_render_rgb(
+        w: c_int,
+        h: c_int,
+        spp: c_int,
+        max_depth: c_int,
+        out_rgb: *mut f32,
+    ) -> c_int;
     fn optix_render_bayer_f32(
         w: c_int,
         h: c_int,
         spp: c_int,
+        max_depth: c_int,
         pattern: c_int,
         out_raw: *mut f32,
     ) -> c_int;
@@ -36,8 +43,8 @@ extern "C" {
 /// # Returns
 /// Zero on success, non-zero on failure.
 #[inline]
-fn ffi_render_rgb(w: i32, h: i32, spp: i32, out: *mut f32) -> c_int {
-    unsafe { optix_render_rgb(w, h, spp, out) }
+fn ffi_render_rgb(w: i32, h: i32, spp: i32, max_depth: i32, out: *mut f32) -> c_int {
+    unsafe { optix_render_rgb(w, h, spp, max_depth, out) }
 }
 /// Render a Bayer mosaic image using the GPU backend.
 ///
@@ -51,8 +58,15 @@ fn ffi_render_rgb(w: i32, h: i32, spp: i32, out: *mut f32) -> c_int {
 /// # Returns
 /// Zero on success, non-zero on failure.
 #[inline]
-fn ffi_render_bayer_f32(w: i32, h: i32, spp: i32, pat: i32, out: *mut f32) -> c_int {
-    unsafe { optix_render_bayer_f32(w, h, spp, pat, out) }
+fn ffi_render_bayer_f32(
+    w: i32,
+    h: i32,
+    spp: i32,
+    max_depth: i32,
+    pat: i32,
+    out: *mut f32,
+) -> c_int {
+    unsafe { optix_render_bayer_f32(w, h, spp, max_depth, pat, out) }
 }
 /// Allocate pinned host memory using the GPU API.
 ///
@@ -556,7 +570,8 @@ fn save_avif_rec2100_pq_from_acescg(
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 10000;
+    let spp = 100;
+    let max_depth = 32;
     let pattern = 0;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
@@ -569,11 +584,14 @@ fn main() {
     let bayer = unsafe { std::slice::from_raw_parts_mut(bayer_ptr, (w * h) as usize) };
 
     let t0 = Instant::now();
-    assert_eq!(ffi_render_rgb(w, h, spp, rgb_ptr), 0);
+    assert_eq!(ffi_render_rgb(w, h, spp, max_depth, rgb_ptr), 0);
     let t_rgb = t0.elapsed();
 
     let t1 = Instant::now();
-    assert_eq!(ffi_render_bayer_f32(w, h, spp, pattern, bayer_ptr), 0);
+    assert_eq!(
+        ffi_render_bayer_f32(w, h, spp, max_depth, pattern, bayer_ptr),
+        0
+    );
     let t_raw = t1.elapsed();
     let mut lums = Vec::with_capacity((w * h) as usize);
 
@@ -622,7 +640,6 @@ fn main() {
         t_demosaic
     );
 
-    println!("✅ Saved pt_bayer.png");
     match save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exp_raw) {
         Ok(_) => println!("✅ Saved pt_bayer.png"),
         Err(e) => eprintln!("Failed to save pt_bayer.png: {}", e),
