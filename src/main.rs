@@ -6,6 +6,7 @@ use rav1e::color::PixelRange;
 use ravif::{BitDepth, MatrixCoefficients};
 use std::ffi::c_int;
 use std::fs::File;
+use std::io;
 use std::time::Instant;
 
 // ---- FFI selection ----------------------------------------------------------
@@ -34,6 +35,16 @@ extern "C" {
 }
 
 // Stable shims used by the rest of main():
+/// Render a full RGB image using the GPU backend.
+///
+/// # Parameters
+/// - `w`: Image width in pixels. Must be positive.
+/// - `h`: Image height in pixels. Must be positive.
+/// - `spp`: Samples per pixel. Must be positive.
+/// - `out`: Pointer to a buffer of at least `w * h * 3` `f32` values.
+///
+/// # Returns
+/// Zero on success, non-zero on failure.
 #[inline]
 fn ffi_render_rgb(w: i32, h: i32, spp: i32, out: *mut f32) -> c_int {
     //    #[cfg(feature="optix")]
@@ -42,6 +53,17 @@ fn ffi_render_rgb(w: i32, h: i32, spp: i32, out: *mut f32) -> c_int {
     }
     //    #[cfg(not(feature="optix"))] unsafe { return gpu_render_rgb(w, h, spp, out); }
 }
+/// Render a Bayer mosaic image using the GPU backend.
+///
+/// # Parameters
+/// - `w`: Image width in pixels. Must be positive.
+/// - `h`: Image height in pixels. Must be positive.
+/// - `spp`: Samples per pixel. Must be positive.
+/// - `pat`: Bayer pattern index.
+/// - `out`: Pointer to a buffer of at least `w * h` `f32` values.
+///
+/// # Returns
+/// Zero on success, non-zero on failure.
 #[inline]
 fn ffi_render_bayer_f32(w: i32, h: i32, spp: i32, pat: i32, out: *mut f32) -> c_int {
     //    #[cfg(feature="optix")]
@@ -50,113 +72,92 @@ fn ffi_render_bayer_f32(w: i32, h: i32, spp: i32, pat: i32, out: *mut f32) -> c_
     }
     //    #[cfg(not(feature="optix"))] unsafe { return gpu_render_bayer_f32(w, h, spp, pat, out); }
 }
+/// Allocate pinned host memory using the GPU API.
+///
+/// # Safety
+/// The caller must ensure the returned pointer is freed with [`ffi_free_host`].
 #[inline]
 unsafe fn ffi_alloc_host(bytes: usize) -> *mut std::ffi::c_void {
     optix_alloc_host(bytes)
 }
-
+/// Free memory previously allocated with [`ffi_alloc_host`].
+///
+/// # Safety
+/// `ptr` must originate from [`ffi_alloc_host`] and not be used afterwards.
 #[inline]
 unsafe fn ffi_free_host(ptr: *mut std::ffi::c_void) {
     optix_free_host(ptr)
 }
-
+/// Block until all GPU work on the default stream has completed.
 #[inline]
 unsafe fn ffi_stream_sync() {
     optix_synchronize();
 }
 
-// ---- utils, demosaic (unchanged) --------------------------------------------
+// ---- utils, demosaic --------------------------------------------
+/// Convert 2D coordinates into a linear index.
+///
+/// `w` is the image width in pixels. This function performs no bounds checking.
 fn idx(x: i32, y: i32, w: i32) -> usize {
     (y as usize) * (w as usize) + (x as usize)
 }
+/// Clamp `v` into the inclusive range `[lo, hi]`.
 #[inline]
 fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
     v.max(lo).min(hi)
 }
-
+/// Color in a Bayer color filter array.
 #[derive(Copy, Clone, PartialEq)]
 enum CFA {
+    /// Red pixel
     R,
+    /// Green pixel
     G,
+    /// Blue pixel
     B,
 }
 
+/// Return the colour filter at a given pixel for the specified Bayer pattern.
+///
+/// Pattern indices map to 2×2 Bayer arrangements as follows:
+///
+/// * `0`: `RGGB`
+/// * `1`: `BGGR`
+/// * `2`: `GRBG`
+/// * `3`: `GBRG`
 fn cfa_at(x: i32, y: i32, pattern: i32) -> CFA {
-    match pattern {
-        0 => {
-            if (y & 1) == 0 {
-                if (x & 1) == 0 {
-                    CFA::R
-                } else {
-                    CFA::G
-                }
-            } else {
-                if (x & 1) == 0 {
-                    CFA::G
-                } else {
-                    CFA::B
-                }
-            }
-        }
-        1 => {
-            if (y & 1) == 0 {
-                if (x & 1) == 0 {
-                    CFA::B
-                } else {
-                    CFA::G
-                }
-            } else {
-                if (x & 1) == 0 {
-                    CFA::G
-                } else {
-                    CFA::R
-                }
-            }
-        }
-        2 => {
-            if (y & 1) == 0 {
-                if (x & 1) == 0 {
-                    CFA::G
-                } else {
-                    CFA::R
-                }
-            } else {
-                if (x & 1) == 0 {
-                    CFA::B
-                } else {
-                    CFA::G
-                }
-            }
-        }
-        _ => {
-            if (y & 1) == 0 {
-                if (x & 1) == 0 {
-                    CFA::G
-                } else {
-                    CFA::B
-                }
-            } else {
-                if (x & 1) == 0 {
-                    CFA::R
-                } else {
-                    CFA::G
-                }
-            }
-        }
-    }
-}
+    // 2×2 lookup tables for each Bayer configuration.
+    // The table layout is [row][column].
+    const PATTERNS: [[[CFA; 2]; 2]; 4] = [
+        // 0: RGGB
+        [[CFA::R, CFA::G], [CFA::G, CFA::B]],
+        // 1: BGGR
+        [[CFA::B, CFA::G], [CFA::G, CFA::R]],
+        // 2: GRBG
+        [[CFA::G, CFA::R], [CFA::B, CFA::G]],
+        // 3: GBRG
+        [[CFA::G, CFA::B], [CFA::R, CFA::G]],
+    ];
 
+    let p = pattern.max(0).min(3) as usize;
+    PATTERNS[p][(y & 1) as usize][(x & 1) as usize]
+}
+/// Read a value from `img` clamping coordinates to the image bounds.
 fn getf(img: &[f32], w: i32, h: i32, x: i32, y: i32) -> f32 {
     let xx = clamp(x, 0, w - 1);
     let yy = clamp(y, 0, h - 1);
     img[idx(xx, yy, w)]
 }
+/// Write `v` into `img` clamping coordinates to the image bounds.
 fn setf(img: &mut [f32], w: i32, h: i32, x: i32, y: i32, v: f32) {
     let xx = clamp(x, 0, w - 1);
     let yy = clamp(y, 0, h - 1);
     img[idx(xx, yy, w)] = v;
 }
-
+/// Demosaic a Bayer image using the AMaZE algorithm.
+///
+/// `raw` must contain `w * h` samples in row-major order. `pattern` selects the Bayer pattern
+/// (0-3).
 fn demosaic_amaze(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     let n = (w * h) as usize;
     let mut r = vec![0f32; n];
@@ -271,14 +272,15 @@ fn demosaic_amaze(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
             }
         }
     }
-    let mut rg = vec![0f32; n];
-    let mut bg = vec![0f32; n];
+    let mut rg = vec![0.0; n];
+    let mut bg = vec![0.0; n];
     for i in 0..n {
         rg[i] = r[i] - g[i];
         bg[i] = b[i] - g[i];
     }
-    let mut rg2 = rg.clone();
-    let mut bg2 = bg.clone();
+    // Allocate chroma difference buffers without cloning to avoid extra copies
+    let mut rg2 = vec![0.0; n];
+    let mut bg2 = vec![0.0; n];
     for y in 0..h {
         for x in 0..w {
             let gh = (getf(&g, w, h, x - 1, y) - getf(&g, w, h, x + 1, y)).abs();
@@ -309,7 +311,7 @@ fn demosaic_amaze(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     }
     out
 }
-
+/// Demosaic a Bayer image using simple bilinear interpolation.
 fn demosaic_bilinear(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     let mut out = vec![0f32; (w * h * 3) as usize];
     for y in 0..h {
@@ -370,15 +372,21 @@ fn demosaic_bilinear(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
 }
 
 #[cfg(feature = "fast-demosaic")]
+/// Select the demosaic algorithm based on compile-time features.
+/// Uses bilinear interpolation when `fast-demosaic` is enabled.
 fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     demosaic_bilinear(raw, w, h, pattern)
 }
 
 #[cfg(not(feature = "fast-demosaic"))]
+/// Select the demosaic algorithm based on compile-time features.
+/// Uses the AMaZE algorithm when `fast-demosaic` is not enabled.
 fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     demosaic_amaze(raw, w, h, pattern)
 }
-
+/// Return the `p`th percentile of `arr`.
+///
+/// `p` should be in `[0, 1]`. Empty arrays yield `1.0` to avoid division by zero.
 fn percentile(arr: &[f32], p: f32) -> f32 {
     let mut v: Vec<f32> = arr.to_vec();
     let n = v.len();
@@ -389,7 +397,7 @@ fn percentile(arr: &[f32], p: f32) -> f32 {
     let _ = v.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
     v[k].max(1e-6)
 }
-
+/// Multiply a 3×3 matrix by a 3-component vector.
 fn mul3(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     [
         m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
@@ -397,6 +405,7 @@ fn mul3(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
         m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
     ]
 }
+/// ACES filmic tone mapping curve.
 fn aces_film(x: f32) -> f32 {
     let a = 2.51;
     let b = 0.03;
@@ -405,9 +414,11 @@ fn aces_film(x: f32) -> f32 {
     let e = 0.14;
     ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
 }
+/// Apply [`aces_film`] to each channel of `v`.
 fn tonemap_aces(v: [f32; 3]) -> [f32; 3] {
     [aces_film(v[0]), aces_film(v[1]), aces_film(v[2])]
 }
+/// Standard sRGB OETF converting linear light to gamma-encoded value.
 fn oetf_srgb(x: f32) -> f32 {
     if x <= 0.0031308 {
         12.92 * x
@@ -426,8 +437,17 @@ const M_ACESCG_TO_REC2020: [[f32; 3]; 3] = [
     [-0.130257, 1.140802, -0.010547],
     [-0.024003, -0.128968, 1.152971],
 ];
-
-fn save_png_srgb_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32], exposure: f32) {
+/// Save an ACEScg image to an 8-bit sRGB PNG file.
+///
+/// `img_aces` must have `w * h * 3` elements. `exposure` scales the pixel values before
+/// tonemapping.
+fn save_png_srgb_from_acescg(
+    path: &str,
+    w: i32,
+    h: i32,
+    img_aces: &[f32],
+    exposure: f32,
+) -> Result<(), io::Error> {
     let mut buf = vec![0u8; (w * h * 3) as usize];
     for y in 0..h {
         for x in 0..w {
@@ -447,15 +467,16 @@ fn save_png_srgb_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32], expos
             buf[i + 2] = (b * 255.0 + 0.5) as u8;
         }
     }
-    let file = File::create(path).unwrap();
+    let file = File::create(path)?;
     let mut enc = png::Encoder::new(file, w as u32, h as u32);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     enc.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-    let mut writer = enc.write_header().unwrap();
-    writer.write_image_data(&buf).unwrap();
+    let mut writer = enc.write_header()?;
+    writer.write_image_data(&buf)?;
+    Ok(())
 }
-
+/// Convert absolute luminance in nits to a PQ-encoded value.
 fn pq_oetf_from_nits(nits: f32) -> f32 {
     let m1 = 2610.0 / 16384.0;
     let m2 = 2523.0 / 32.0;
@@ -468,9 +489,16 @@ fn pq_oetf_from_nits(nits: f32) -> f32 {
         .powf(m2)
         .clamp(0.0, 1.0)
 }
-
-fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32], exposure: f32) {
-    let n = (w * h) as usize;
+/// Save an ACEScg image as a 10-bit Rec.2100 PQ AVIF file.
+///
+/// `img_aces` must contain `w * h * 3` values. `exposure` scales values before tonemapping.
+fn save_avif_rec2100_pq_from_acescg(
+    path: &str,
+    w: i32,
+    h: i32,
+    img_aces: &[f32],
+    exposure: f32,
+) -> Result<(), io::Error> {    let n = (w * h) as usize;
     let mut rgb10: Vec<rgb::RGB<u16>> = Vec::with_capacity(n);
     for y in 0..h {
         for x in 0..w {
@@ -537,7 +565,8 @@ fn save_avif_rec2100_pq_from_acescg(path: &str, w: i32, h: i32, img_aces: &[f32]
             10,
         );
 
-    std::fs::write(path, &avif_bytes).unwrap();
+    std::fs::write(path, &avif_bytes)?;
+    Ok(())
 }
 
 // ---- main -------------------------------------------------------------------
@@ -575,11 +604,17 @@ fn main() {
         let b = rgb[i * 3 + 2];
         lums.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
     }
-    let exp_rgb = 0.85 / percentile(&lums, 0.85);
-    println!("Auto-exposure: display={:.6}", 0.85);
+    let target_percentile = 0.85;
+    let exp_rgb = target_percentile / percentile(&lums, target_percentile);
+    println!(
+        "Auto-exposure: target percentile={:.2}, exposure multiplier={:.6}",
+        target_percentile, exp_rgb
+    );
 
-    save_png_srgb_from_acescg("pt.png", w, h, &rgb, exp_rgb);
-    println!("✅ Saved pt.png (render {:?})", t_rgb);
+    match save_png_srgb_from_acescg("pt.png", w, h, &rgb, exp_rgb) {
+        Ok(_) => println!("✅ Saved pt.png (render {:?})", t_rgb),
+        Err(e) => eprintln!("Failed to save pt.png: {}", e),
+    }
 
     let t2 = Instant::now();
     let demosaiced = demosaic(&bayer, w, h, pattern);
@@ -591,7 +626,7 @@ fn main() {
         let b = demosaiced[i * 3 + 2];
         l2.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
     }
-    let exp_raw = 0.85 / percentile(&l2, 0.85);
+    let exp_raw = target_percentile / percentile(&l2, target_percentile);
 
     println!("Bayer render: {:?}", t_raw);
     println!(
@@ -608,9 +643,57 @@ fn main() {
     save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exp_rgb);
     save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, exp_raw);
     println!("✅ Saved pt_bayer.png");
+    match save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exp_raw) {
+        Ok(_) => println!("✅ Saved pt_bayer.png"),
+        Err(e) => eprintln!("Failed to save pt_bayer.png: {}", e),
+    }
+    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exp_rgb) {
+        eprintln!("Failed to save pt_pq.avif: {}", e);
+    }
+    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, exp_raw)
+    {
+        eprintln!("Failed to save pt_bayer_pq.avif: {}", e);
+    }
 
     unsafe {
         ffi_free_host(rgb_ptr as *mut std::ffi::c_void);
         ffi_free_host(bayer_ptr as *mut std::ffi::c_void);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cfa_at, CFA};
+
+    #[test]
+    fn pattern_rggb() {
+        assert_eq!(cfa_at(0, 0, 0), CFA::R);
+        assert_eq!(cfa_at(1, 0, 0), CFA::G);
+        assert_eq!(cfa_at(0, 1, 0), CFA::G);
+        assert_eq!(cfa_at(1, 1, 0), CFA::B);
+    }
+
+    #[test]
+    fn pattern_bggr() {
+        assert_eq!(cfa_at(0, 0, 1), CFA::B);
+        assert_eq!(cfa_at(1, 0, 1), CFA::G);
+        assert_eq!(cfa_at(0, 1, 1), CFA::G);
+        assert_eq!(cfa_at(1, 1, 1), CFA::R);
+    }
+
+    #[test]
+    fn pattern_grbg() {
+        assert_eq!(cfa_at(0, 0, 2), CFA::G);
+        assert_eq!(cfa_at(1, 0, 2), CFA::R);
+        assert_eq!(cfa_at(0, 1, 2), CFA::B);
+        assert_eq!(cfa_at(1, 1, 2), CFA::G);
+    }
+
+    #[test]
+    fn pattern_gbrg() {
+        assert_eq!(cfa_at(0, 0, 3), CFA::G);
+        assert_eq!(cfa_at(1, 0, 3), CFA::B);
+        assert_eq!(cfa_at(0, 1, 3), CFA::R);
+        assert_eq!(cfa_at(1, 1, 3), CFA::G);
     }
 }

@@ -3,7 +3,8 @@ project(optix_host LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
-set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0")
+# Allow users to provide OPTIX_ROOT via the cache or environment.
+set(OPTIX_ROOT "" CACHE PATH "Path to the OptiX SDK")
 
 # Expose tunables for register usage, launch configuration and stack sizing.
 # Use CACHE STRING so the values are passed verbatim instead of "ON"/"OFF".
@@ -18,12 +19,16 @@ set(OPTIX_STACK_SIZE_SCALE 1.0 CACHE STRING
 find_package(CUDAToolkit REQUIRED)
 
 # ---- OptiX ----
-# Set OPTIX_ROOT to your SDK root (e.g. "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0")
+# Set OPTIX_ROOT to your SDK root.
+if(NOT OPTIX_ROOT)
+    if(DEFINED ENV{OPTIX_ROOT} AND NOT "$ENV{OPTIX_ROOT}" STREQUAL "")
+        set(OPTIX_ROOT "$ENV{OPTIX_ROOT}" CACHE PATH "Path to the OptiX SDK" FORCE)
 if(NOT DEFINED OPTIX_ROOT)
     if(DEFINED ENV{OPTIX_ROOT})
         set(OPTIX_ROOT "$ENV{OPTIX_ROOT}")
     else()
-        message(FATAL_ERROR "Set OPTIX_ROOT (or env OPTIX_ROOT) to your OptiX SDK root")
+        message(FATAL_ERROR
+                "OPTIX_ROOT is not set. Set the OPTIX_ROOT environment variable or pass -DOPTIX_ROOT=/path/to/optix to CMake.")
     endif()
 endif()
 message(STATUS "Using OptiX SDK at: ${OPTIX_ROOT}")
