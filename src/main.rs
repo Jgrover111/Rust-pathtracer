@@ -570,7 +570,7 @@ fn save_avif_rec2100_pq_from_acescg(
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 100;
+    let spp = 128;
     let max_depth = 32;
     let pattern = 0;
 

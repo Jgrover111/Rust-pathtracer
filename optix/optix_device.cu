@@ -200,24 +200,58 @@ static __forceinline__ __device__ float3 fresnel_schlick(float cosTheta, const f
   return F0 + (make3(1.0f) - F0) * powf(fmaxf(0.0f, 1.0f - cosTheta), 5.0f);
 }
 
-static __forceinline__ __device__ float3 sample_ggx(float2 u, float alpha, const float3& N, const float3& V,
-                                                    float3& L, float& pdf)
+// Sample the GGX microfacet distribution using the Visible Normal Distribution
+// Function (VNDF) technique. This method better matches the distribution of
+// visible microfacets for the given view direction, reducing variance compared
+// to sampling the full NDF. See "Sampling the GGX Distribution of Visible
+// Normals" by Heitz (2018).
+static __forceinline__ __device__ void sample_ggx_vndf(
+    float2 u, float alpha, const float3& N, const float3& V, float3& L, float3& H, float& pdf)
 {
-  float phi = 2.0f * CUDART_PI_F * u.x;
-  float cosTheta = sqrtf((1.0f - u.y) / (1.0f + (alpha * alpha - 1.0f) * u.y));
-  float sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
-  float3 hLocal = make_float3(sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta);
-  float3 t, b;
-  make_onb(N, t, b);
-  float3 H = normalize(hLocal.x * t + hLocal.y * b + hLocal.z * N);
+  // Build an orthonormal basis and transform the view direction to local space
+  float3 T, B;
+  make_onb(N, T, B);
+  float3 Vlocal = make_float3(dot(V, T), dot(V, B), dot(V, N));
+
+  // Stretch view direction by the roughness parameter (Heitz 2018)
+  float3 Vh = normalize(make_float3(alpha * Vlocal.x, alpha * Vlocal.y, Vlocal.z));
+
+  // Orthonormal basis around the stretched view direction
+  float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  float3 T1 = lensq > 0.0f ? make_float3(-Vh.y, Vh.x, 0.0f) / sqrtf(lensq)
+                           : make_float3(1.0f, 0.0f, 0.0f);
+  float3 T2 = cross(Vh, T1);
+
+  // Sample a point on a disk (polar coordinates)
+  float r = sqrtf(u.x);
+  float phi = 2.0f * CUDART_PI_F * u.y;
+  float t1 = r * cosf(phi);
+  float t2 = r * sinf(phi);
+
+  // Adjust t2 based on view direction to obtain a visible normal
+  float s = 0.5f * (1.0f + Vh.z);
+  t2 = (1.0f - s) * sqrtf(fmaxf(0.0f, 1.0f - t1 * t1)) + s * t2;
+
+  // Reproject onto hemisphere and unstretch
+  float3 Nh = t1 * T1 + t2 * T2 + sqrtf(fmaxf(0.0f, 1.0f - t1 * t1 - t2 * t2)) * Vh;
+  float3 Hlocal = normalize(make_float3(alpha * Nh.x, alpha * Nh.y, fmaxf(0.0f, Nh.z)));
+
+  // Transform the half-vector back to world space
+  H = normalize(Hlocal.x * T + Hlocal.y * B + Hlocal.z * N);
+
+  // Compute the reflected direction
   L = normalize(reflect(-V, H));
+
+  // Compute PDF for the sampled direction. For VNDF sampling, this is
+  // D(h) * G1(v) * (n·h) / (4 * (v·h))
   float NoH = fmaxf(dot(N, H), 0.0f);
+  float NoV = fmaxf(dot(N, V), 0.0f);
   float VoH = fmaxf(dot(V, H), 0.0f);
   float alpha2 = alpha * alpha;
   float denom = NoH * NoH * (alpha2 - 1.0f) + 1.0f;
   float D = alpha2 / (CUDART_PI_F * denom * denom);
-  pdf = D * NoH / (4.0f * fmaxf(VoH, 1e-6f));
-  return H;
+  float G1V = 2.0f * NoV / (NoV + sqrtf(alpha2 + (1.0f - alpha2) * NoV * NoV));
+  pdf = (D * NoH * G1V) / (4.0f * fmaxf(VoH, 1e-6f));
 }
 
 // --- payload packing -------------------------------------------------------
@@ -401,12 +435,12 @@ extern "C" __global__ void __closesthit__ch()
         float2 u = make_float2(rnd(seed), rnd(seed));
         float3 V = -prd.direction;
         float3 newDir;
+        float3 H;
         float pdf;
         float alpha = fmaxf(Roughness * Roughness, 1e-4f);
-        sample_ggx(u, alpha, Ng, V, newDir, pdf);
+        sample_ggx_vndf(u, alpha, Ng, V, newDir, H, pdf);
         float NoL = fmaxf(dot(Ng, newDir), 0.0f);
         float NoV = fmaxf(dot(Ng, V), 0.0f);
-        float3 H = normalize(newDir + V);
         float VoH = fmaxf(dot(V, H), 0.0f);
         float NoH = fmaxf(dot(Ng, H), 0.0f);
         float k = (alpha + 1.0f) * (alpha + 1.0f) * 0.125f;
@@ -548,12 +582,12 @@ extern "C" __global__ void __closesthit__ch_bayer()
         float2 u = make_float2(rnd(seed), rnd(seed));
         float3 V = -prd.direction;
         float3 newDir;
+        float3 H;
         float pdf;
         float alpha = fmaxf(Roughness * Roughness, 1e-4f);
-        sample_ggx(u, alpha, Ng, V, newDir, pdf);
+        sample_ggx_vndf(u, alpha, Ng, V, newDir, H, pdf);
         float NoL = fmaxf(dot(Ng, newDir), 0.0f);
         float NoV = fmaxf(dot(Ng, V), 0.0f);
-        float3 H = normalize(newDir + V);
         float VoH = fmaxf(dot(V, H), 0.0f);
         float NoH = fmaxf(dot(Ng, H), 0.0f);
         float k = (alpha + 1.0f) * (alpha + 1.0f) * 0.125f;

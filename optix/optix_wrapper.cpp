@@ -342,10 +342,10 @@ static void buildCornell(State& s)
   const float3 black = make_float3(0,0,0);
   const float3 emit  = make_float3(15.f, 15.f, 15.f);
 
-  auto push_material = [&](const float3& base, const float3& emit_c){
+  auto push_material = [&](const float3& base, const float& roughness, const float3& emit_c){
     s.Base_colour.push_back(base); s.Base_colour.push_back(base);
     s.Metallic.push_back(0.f); s.Metallic.push_back(0.f);
-    s.Roughness.push_back(0.f); s.Roughness.push_back(0.f);
+    s.Roughness.push_back(roughness); s.Roughness.push_back(roughness);
     s.IOR.push_back(1.5f); s.IOR.push_back(1.5f);
     s.Alpha.push_back(1.f); s.Alpha.push_back(1.f);
     s.Transmission.push_back(0.f); s.Transmission.push_back(0.f);
@@ -365,23 +365,23 @@ static void buildCornell(State& s)
 
   // floor (white)
   addQuad(s.vertices, s.indices, A,B,C,D);
-  push_material(white, black);
+  push_material(white, 0.25f, black);
 
   // ceiling (white)
   addQuad(s.vertices, s.indices, Du,Cu,Bu,Au);
-  push_material(white, black);
+  push_material(white, 0.25f, black);
 
   // back wall (white)
   addQuad(s.vertices, s.indices, A,Au,Bu,B);
-  push_material(white, black);
+  push_material(white, 0.25f, black);
 
   // right wall (green)
   addQuad(s.vertices, s.indices, D,Du,Au,A);
-  push_material(green, black);
+  push_material(green, 0.25f, black);
 
   // left wall (red)
   addQuad(s.vertices, s.indices, B,Bu,Cu,C);
-  push_material(red, black);
+  push_material(red, 0.25f, black);
 
   // ceiling light cutout (small rectangle) — make it emissive
   const float3 L0 = make_float3(-0.3f, -0.3f, 1.999f);
@@ -389,7 +389,7 @@ static void buildCornell(State& s)
   const float3 L2 = make_float3( 0.3f,  0.3f, 1.999f);
   const float3 L3 = make_float3(-0.3f,  0.3f, 1.999f);
   addQuad(s.vertices, s.indices, L3,L2,L1,L0);
-  push_material(white, emit);
+  push_material(white, 0.25f, emit);
 
   // optional: a short box (white)
   {
@@ -406,7 +406,7 @@ static void buildCornell(State& s)
 
     auto addRect = [&](float3 a,float3 b,float3 c,float3 d){
       addQuad(s.vertices, s.indices, a,b,c,d);
-      push_material(white, black);
+      push_material(white, 0.25f, black);
     };
     addRect(p3,p2,p1,p0); // bottom
     addRect(q0,q1,q2,q3); // top
