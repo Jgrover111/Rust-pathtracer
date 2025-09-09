@@ -556,7 +556,7 @@ fn save_avif_rec2100_pq_from_acescg(
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 512;
+    let spp = 10000;
     let pattern = 0;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
@@ -622,9 +622,6 @@ fn main() {
         t_demosaic
     );
 
-    save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exp_raw);
-    save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exp_rgb);
-    save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, exp_raw);
     println!("✅ Saved pt_bayer.png");
     match save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exp_raw) {
         Ok(_) => println!("✅ Saved pt_bayer.png"),
