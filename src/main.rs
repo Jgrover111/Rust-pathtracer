@@ -16,6 +16,7 @@ extern "C" {
         h: c_int,
         spp: c_int,
         max_depth: c_int,
+        filter_glossy: f32,
         out_rgb: *mut f32,
     ) -> c_int;
     fn optix_render_bayer_f32(
@@ -23,6 +24,7 @@ extern "C" {
         h: c_int,
         spp: c_int,
         max_depth: c_int,
+        filter_glossy: f32,
         pattern: c_int,
         out_raw: *mut f32,
     ) -> c_int;
@@ -43,8 +45,15 @@ extern "C" {
 /// # Returns
 /// Zero on success, non-zero on failure.
 #[inline]
-fn ffi_render_rgb(w: i32, h: i32, spp: i32, max_depth: i32, out: *mut f32) -> c_int {
-    unsafe { optix_render_rgb(w, h, spp, max_depth, out) }
+fn ffi_render_rgb(
+    w: i32,
+    h: i32,
+    spp: i32,
+    max_depth: i32,
+    filter_glossy: f32,
+    out: *mut f32,
+) -> c_int {
+    unsafe { optix_render_rgb(w, h, spp, max_depth, filter_glossy, out) }
 }
 /// Render a Bayer mosaic image using the GPU backend.
 ///
@@ -63,10 +72,11 @@ fn ffi_render_bayer_f32(
     h: i32,
     spp: i32,
     max_depth: i32,
+    filter_glossy: f32,
     pat: i32,
     out: *mut f32,
 ) -> c_int {
-    unsafe { optix_render_bayer_f32(w, h, spp, max_depth, pat, out) }
+    unsafe { optix_render_bayer_f32(w, h, spp, max_depth, filter_glossy, pat, out) }
 }
 /// Allocate pinned host memory using the GPU API.
 ///
@@ -570,9 +580,10 @@ fn save_avif_rec2100_pq_from_acescg(
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 10000;
+    let spp = 100;
     let max_depth = 32;
     let pattern = 0;
+    let filter_glossy = 0.35f32;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
     let bayer_bytes = (w * h) as usize * std::mem::size_of::<f32>();
@@ -584,12 +595,15 @@ fn main() {
     let bayer = unsafe { std::slice::from_raw_parts_mut(bayer_ptr, (w * h) as usize) };
 
     let t0 = Instant::now();
-    assert_eq!(ffi_render_rgb(w, h, spp, max_depth, rgb_ptr), 0);
+    assert_eq!(
+        ffi_render_rgb(w, h, spp, max_depth, filter_glossy, rgb_ptr),
+        0
+    );
     let t_rgb = t0.elapsed();
 
     let t1 = Instant::now();
     assert_eq!(
-        ffi_render_bayer_f32(w, h, spp, max_depth, pattern, bayer_ptr),
+        ffi_render_bayer_f32(w, h, spp, max_depth, filter_glossy, pattern, bayer_ptr),
         0
     );
     let t_raw = t1.elapsed();
@@ -605,14 +619,14 @@ fn main() {
         let b = rgb[i * 3 + 2];
         lums.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
     }
-    let target_percentile = 0.85;
-    let exp_rgb = target_percentile / percentile(&lums, target_percentile);
-    println!(
-        "Auto-exposure: target percentile={:.2}, exposure multiplier={:.6}",
-        target_percentile, exp_rgb
-    );
+//    let target_percentile = 0.98;
+//    let exp_rgb = target_percentile / percentile(&lums, target_percentile);
+//    println!(
+//        "Auto-exposure: target percentile={:.2}, exposure multiplier={:.6}",
+//        target_percentile, exp_rgb
+//    );
 
-    match save_png_srgb_from_acescg("pt.png", w, h, &rgb, exp_rgb) {
+    match save_png_srgb_from_acescg("pt.png", w, h, &rgb, 1.0) {
         Ok(_) => println!("✅ Saved pt.png (render {:?})", t_rgb),
         Err(e) => eprintln!("Failed to save pt.png: {}", e),
     }
@@ -627,7 +641,7 @@ fn main() {
         let b = demosaiced[i * 3 + 2];
         l2.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
     }
-    let exp_raw = target_percentile / percentile(&l2, target_percentile);
+//    let exp_raw = target_percentile / percentile(&l2, target_percentile);
 
     println!("Bayer render: {:?}", t_raw);
     println!(
@@ -640,14 +654,14 @@ fn main() {
         t_demosaic
     );
 
-    match save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exp_raw) {
+    match save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, 1.0) {
         Ok(_) => println!("✅ Saved pt_bayer.png"),
         Err(e) => eprintln!("Failed to save pt_bayer.png: {}", e),
     }
-    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exp_rgb) {
+    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, 1.0) {
         eprintln!("Failed to save pt_pq.avif: {}", e);
     }
-    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, exp_raw)
+    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, 1.0)
     {
         eprintln!("Failed to save pt_bayer_pq.avif: {}", e);
     }

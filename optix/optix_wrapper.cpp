@@ -187,6 +187,7 @@ struct Params
   float3 light_emit;
   float3 light_normal;
   float2 light_half;
+  float  filter_glossy;
 };
 
 using RaygenRecord  = SbtRecord<EmptyData>;
@@ -394,15 +395,15 @@ static void buildCornell(State& s)
   // optional: a short box (white)
   {
     float z0 = 0.001f, z1 = 0.6f;
-    float3 p0 = make_float3(-0.424f,  0.0f, z0);
-    float3 p1 = make_float3( 0.0f, -0.424f, z0);
-    float3 p2 = make_float3( 0.424f, 0.0f, z0);
-    float3 p3 = make_float3( 0.0f,  0.424f, z0);
+    float3 p0 = make_float3(0.076f,  -0.5f, z0);
+    float3 p1 = make_float3(0.5f, -0.924f, z0);
+    float3 p2 = make_float3(0.924f, -0.5f, z0);
+    float3 p3 = make_float3(0.5f,  -0.076f, z0);
 
-    float3 q0 = make_float3(-0.424f,  0.0f, z1);
-    float3 q1 = make_float3( 0.0f, -0.424f, z1);
-    float3 q2 = make_float3( 0.424f, 0.0f, z1);
-    float3 q3 = make_float3( 0.0f,  0.424f, z1);
+    float3 q0 = make_float3(0.076f,  -0.5f, z1);
+    float3 q1 = make_float3(0.5f, -0.924f, z1);
+    float3 q2 = make_float3(0.924f, -0.5f, z1);
+    float3 q3 = make_float3(0.5f,  -0.076f, z1);
 
     auto addRect = [&](float3 a,float3 b,float3 c,float3 d){
       addQuad(s.vertices, s.indices, a,b,c,d);
@@ -791,6 +792,7 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.light_emit = make_float3(15.f, 15.f, 15.f); // match emissive ceiling light
   st->h_params.light_normal = normalize3(make_float3(0.f, 0.f, -1.f));
   st->h_params.light_half = make_float2(0.3f, 0.3f);
+  st->h_params.filter_glossy = 0.0f;
 
   // pipeline
   createPipeline(*st);
@@ -878,7 +880,7 @@ void  optix_ctx_set_camera(void* handle,
   CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
 }
 
-static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float* out_rgb)
+static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float filter_glossy, float* out_rgb)
 {
     if (!out_rgb) return -1;
     // same pattern you use elsewhere: update Params on device, launch, copy back
@@ -887,6 +889,7 @@ static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float* out
     s.h_params.frame++;
     s.h_params.spp = spp;
     s.h_params.max_depth = max_depth;
+    s.h_params.filter_glossy = filter_glossy;
     // If your renderer needs any per-frame fields set, do it here.
     // e.g., s.h_params.bayer_pattern = s.bayer_pattern;   // (RGB path usually not needed)
 
@@ -922,7 +925,7 @@ static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float* out
     return 0;
 }
 
-static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, float* out_raw)
+static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, float filter_glossy, float* out_raw)
 {
     if (!out_raw) return -1;
     auto& s = *reinterpret_cast<State*>(handle);
@@ -930,6 +933,7 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, floa
     s.h_params.frame++;
     s.h_params.spp = spp;
     s.h_params.max_depth = max_depth;
+    s.h_params.filter_glossy = filter_glossy;
     s.h_params.bayer_pattern = s.bayer_pattern;  // keep whatever you already store in s.bayer_pattern
     CU_CHECK( cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream) );
     // Disable RGB output for this launch by zeroing the device-side pointer.
@@ -985,18 +989,18 @@ static void ensure_handle(int w, int h)
 }
 
 extern "C" __declspec(dllexport)
-int optix_render_rgb(int w, int h, int spp, int max_depth, float* out_rgb)
+int optix_render_rgb(int w, int h, int spp, int max_depth, float filter_glossy, float* out_rgb)
 {
     ensure_handle(w, h);
-    return optix_ctx_render_rgb(g_handle, spp, max_depth, out_rgb);
+    return optix_ctx_render_rgb(g_handle, spp, max_depth, filter_glossy, out_rgb);
 }
 
 extern "C" __declspec(dllexport)
-int optix_render_bayer_f32(int w, int h, int spp, int max_depth, int pat, float* out_raw)
+int optix_render_bayer_f32(int w, int h, int spp, int max_depth, float filter_glossy, int pat, float* out_raw)
 {
     ensure_handle(w, h);
     optix_ctx_set_bayer(g_handle, pat);
-    return optix_ctx_render_bayer_f32(g_handle, spp, max_depth, out_raw);
+    return optix_ctx_render_bayer_f32(g_handle, spp, max_depth, filter_glossy, out_raw);
 }
 extern "C" __declspec(dllexport)
 void optix_synchronize()

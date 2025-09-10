@@ -34,6 +34,7 @@ struct Params
   float3                   light_emit;
   float3                   light_normal;
   float2                   light_half;
+  float                    filter_glossy;
 };
 
 extern "C" {
@@ -305,6 +306,7 @@ struct PRD {
     // MIS: previous bounce's BSDF pdf and validity flag
     float  prev_pdf_bsdf;
     int    prev_pdf_valid;
+    float  min_roughness;
     int    px;
     int    py;
     int    sample;
@@ -321,6 +323,7 @@ struct PRDScalar {
     int    done;
     float  prev_pdf_bsdf;
     int    prev_pdf_valid;
+    float  min_roughness;
     int    ch;
     int    px;
     int    py;
@@ -393,7 +396,8 @@ extern "C" __global__ void __closesthit__ch()
     // Fetch per-triangle materials from SBT
     const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());
     const float3 Base_colour = hg->Base_colour;
-    const float Roughness = hg->Roughness;
+    const float baseRoughness = hg->Roughness;
+    float Roughness = fmaxf(baseRoughness, prd.min_roughness);
     const float IOR = hg->IOR;
     const float3 Emission = hg->Emission;
     const float Transmission = hg->Transmission;
@@ -436,6 +440,7 @@ extern "C" __global__ void __closesthit__ch()
             }
             prd.throughput = prd.throughput / fmaxf(p, 1e-3f);
         }
+        prd.min_roughness = fmaxf(prd.min_roughness, Roughness * params.filter_glossy);
         return;
     }
 
@@ -564,6 +569,7 @@ extern "C" __global__ void __closesthit__ch()
         prd.prev_pdf_valid = 1;
     }
 
+    prd.min_roughness = fmaxf(prd.min_roughness, Roughness * params.filter_glossy);
     prd.depth++;
     if (prd.depth >= params.max_depth) {
         prd.done = 1;
@@ -603,7 +609,8 @@ extern "C" __global__ void __closesthit__ch_bayer()
 
     const HitgroupData* hg = reinterpret_cast<const HitgroupData*>(optixGetSbtDataPointer());
     const float3 Base_colour = hg->Base_colour;
-    const float Roughness = hg->Roughness;
+    const float baseRoughness = hg->Roughness;
+    float Roughness = fmaxf(baseRoughness, prd.min_roughness);
     const float IOR = hg->IOR;
     const float3 Emission = hg->Emission;
     const float Transmission = hg->Transmission;
@@ -650,6 +657,7 @@ extern "C" __global__ void __closesthit__ch_bayer()
             }
             prd.throughput *= (1.0f / p);
         }
+        prd.min_roughness = fmaxf(prd.min_roughness, Roughness * params.filter_glossy);
         return;
     }
 
@@ -777,6 +785,7 @@ extern "C" __global__ void __closesthit__ch_bayer()
         prd.prev_pdf_valid = 1;
     }
 
+    prd.min_roughness = fmaxf(prd.min_roughness, Roughness * params.filter_glossy);
     prd.depth++;
     if (prd.depth >= params.max_depth) {
         prd.done = 1;
@@ -850,6 +859,7 @@ extern "C" __global__ void __raygen__rg()
     prd.seed = seed;
     prd.prev_pdf_bsdf = 0.0f;
     prd.prev_pdf_valid = 0;
+    prd.min_roughness = 0.0f;
     prd.px = x;
     prd.py = y;
     prd.sample = s;
@@ -923,6 +933,7 @@ extern "C" __global__ void __raygen__bayer()
     prd.prev_pdf_bsdf = 0.0f;
     prd.prev_pdf_valid = 0;
     prd.ch = ch;
+    prd.min_roughness = 0.0f;
     prd.px = x;
     prd.py = y;
     prd.sample = s;
