@@ -380,19 +380,6 @@ fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
 fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     demosaic_amaze(raw, w, h, pattern)
 }
-/// Return the `p`th percentile of `arr`.
-///
-/// `p` should be in `[0, 1]`. Empty arrays yield `1.0` to avoid division by zero.
-fn percentile(arr: &[f32], p: f32) -> f32 {
-    let mut v: Vec<f32> = arr.to_vec();
-    let n = v.len();
-    if n == 0 {
-        return 1.0;
-    }
-    let k = ((n as f32 - 1.0) * p).round().max(0.0) as usize;
-    let _ = v.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
-    v[k].max(1e-6)
-}
 /// Multiply a 3×3 matrix by a 3-component vector.
 fn mul3(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     [
@@ -593,26 +580,14 @@ fn main() {
         0
     );
     let t_raw = t1.elapsed();
-    let mut lums = Vec::with_capacity((w * h) as usize);
-
     // Synchronize only when the CPU needs to read the GPU output
     unsafe {
         ffi_stream_sync();
     }
-    for i in 0..(w * h) as usize {
-        let r = rgb[i * 3];
-        let g = rgb[i * 3 + 1];
-        let b = rgb[i * 3 + 2];
-        lums.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
-    }
-    let target_percentile = 0.85;
-    let exp_rgb = target_percentile / percentile(&lums, target_percentile);
-    println!(
-        "Auto-exposure: target percentile={:.2}, exposure multiplier={:.6}",
-        target_percentile, exp_rgb
-    );
+    let exposure = 1.0f32;
+    println!("Exposure multiplier={:.6}", exposure);
 
-    match save_png_srgb_from_acescg("pt.png", w, h, &rgb, exp_rgb) {
+    match save_png_srgb_from_acescg("pt.png", w, h, &rgb, exposure) {
         Ok(_) => println!("✅ Saved pt.png (render {:?})", t_rgb),
         Err(e) => eprintln!("Failed to save pt.png: {}", e),
     }
@@ -620,15 +595,6 @@ fn main() {
     let t2 = Instant::now();
     let demosaiced = demosaic(&bayer, w, h, pattern);
     let t_demosaic = t2.elapsed();
-    let mut l2 = Vec::with_capacity((w * h) as usize);
-    for i in 0..(w * h) as usize {
-        let r = demosaiced[i * 3];
-        let g = demosaiced[i * 3 + 1];
-        let b = demosaiced[i * 3 + 2];
-        l2.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
-    }
-    let exp_raw = target_percentile / percentile(&l2, target_percentile);
-
     println!("Bayer render: {:?}", t_raw);
     println!(
         "Demosaic ({}): {:?}",
@@ -640,14 +606,15 @@ fn main() {
         t_demosaic
     );
 
-    match save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exp_raw) {
+    match save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exposure) {
         Ok(_) => println!("✅ Saved pt_bayer.png"),
         Err(e) => eprintln!("Failed to save pt_bayer.png: {}", e),
     }
-    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exp_rgb) {
+    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exposure) {
         eprintln!("Failed to save pt_pq.avif: {}", e);
     }
-    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, exp_raw)
+    if let Err(e) =
+        save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, exposure)
     {
         eprintln!("Failed to save pt_bayer_pq.avif: {}", e);
     }
