@@ -177,6 +177,19 @@ static __forceinline__ __device__ float2 olpf_jitter(int x, int y, int s, int fr
   return make_float2(sample_tri(u.x), sample_tri(u.y));
 }
 
+template<typename T>
+static __forceinline__ __device__ float next_rand(T& prd)
+{
+  if (prd.rng_dim < 2) {
+    float2 u = blue_noise(prd.px, prd.py, prd.sample, params.frame);
+    float r = prd.rng_dim == 0 ? u.x : u.y;
+    prd.rng_dim++;
+    return r;
+  }
+  prd.rng_dim++;
+  return rnd(prd.seed);
+}
+
 static __forceinline__ __device__ void make_onb(const float3& n, float3& t, float3& b)
 {
   if (n.z < -0.9999999f) {
@@ -292,6 +305,10 @@ struct PRD {
     // MIS: previous bounce's BSDF pdf and validity flag
     float  prev_pdf_bsdf;
     int    prev_pdf_valid;
+    int    px;
+    int    py;
+    int    sample;
+    int    rng_dim;
 };
 
 struct PRDScalar {
@@ -305,6 +322,10 @@ struct PRDScalar {
     float  prev_pdf_bsdf;
     int    prev_pdf_valid;
     int    ch;
+    int    px;
+    int    py;
+    int    sample;
+    int    rng_dim;
 };
 
 // --- access helpers for CUdeviceptr arrays --------------------------------
@@ -378,7 +399,6 @@ extern "C" __global__ void __closesthit__ch()
     const float Transmission = hg->Transmission;
 
     if (Transmission > 0.0f) {
-        unsigned long long& seed = prd.seed;
         float3 N = dot(prd.direction, Ng) < 0.0f ? Ng : -Ng;
         float eta = dot(prd.direction, Ng) < 0.0f ? 1.0f / IOR : IOR;
         float3 I = prd.direction;
@@ -386,7 +406,7 @@ extern "C" __global__ void __closesthit__ch()
         float f0 = (IOR - 1.0f) / (IOR + 1.0f);
         f0 = f0 * f0;
         float Fr = f0 + (1.0f - f0) * powf(1.0f - cosi, 5.0f);
-        if (rnd(seed) < Fr) {
+        if (next_rand(prd) < Fr) {
             prd.origin = P + N * 1e-3f;
             prd.direction = reflect(I, N);
         } else {
@@ -410,7 +430,7 @@ extern "C" __global__ void __closesthit__ch()
         }
         if (prd.depth >= params.max_depth - 2) {
             float p = fmaxf(prd.throughput.x, fmaxf(prd.throughput.y, prd.throughput.z));
-            if (rnd(seed) > p) {
+            if (next_rand(prd) > p) {
                 prd.done = 1;
                 return;
             }
@@ -430,11 +450,10 @@ extern "C" __global__ void __closesthit__ch()
     float3 kd = Base_colour * (make3(1.0f) - F);
 
     // Sample direct illumination from rectangular area light
-    unsigned long long& seed = prd.seed;
     float3 Lo = make3(0.0f);
     {
-        float u = (rnd(seed) * 2.0f - 1.0f) * params.light_half.x;
-        float v = (rnd(seed) * 2.0f - 1.0f) * params.light_half.y;
+        float u = (next_rand(prd) * 2.0f - 1.0f) * params.light_half.x;
+        float v = (next_rand(prd) * 2.0f - 1.0f) * params.light_half.y;
         float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y + v, params.light_pos.z);
         float3 L = lp - P;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
@@ -499,9 +518,9 @@ extern "C" __global__ void __closesthit__ch()
     }
     prd.radiance += emission + Lo;
 
-    float choose = rnd(seed);
+    float choose = next_rand(prd);
     if (choose < spec_prob) {
-        float2 u = make_float2(rnd(seed), rnd(seed));
+        float2 u = make_float2(next_rand(prd), next_rand(prd));
         float3 V = -prd.direction;
         float3 newDir;
         float3 H;
@@ -527,8 +546,8 @@ extern "C" __global__ void __closesthit__ch()
         prd.prev_pdf_bsdf = pdf * spec_prob;
         prd.prev_pdf_valid = 1;
     } else {
-        float r1 = rnd(seed);
-        float r2 = rnd(seed);
+        float r1 = next_rand(prd);
+        float r2 = next_rand(prd);
         const float phi = 2.0f * CUDART_PI_F * r1;
         const float cosTheta = sqrtf(1.0f - r2);
         const float sinTheta = sqrtf(r2);
@@ -552,7 +571,7 @@ extern "C" __global__ void __closesthit__ch()
     }
     if (prd.depth >= params.max_depth - 2) {
         float p = fmaxf(prd.throughput.x, fmaxf(prd.throughput.y, prd.throughput.z));
-        if (rnd(seed) > p) {
+        if (next_rand(prd) > p) {
             prd.done = 1;
             return;
         }
@@ -594,7 +613,6 @@ extern "C" __global__ void __closesthit__ch_bayer()
     float emission = select(Emission, ch);
 
     if (Transmission > 0.0f) {
-        unsigned long long& seed = prd.seed;
         float3 N = dot(prd.direction, Ng) < 0.0f ? Ng : -Ng;
         float eta = dot(prd.direction, Ng) < 0.0f ? 1.0f / IOR : IOR;
         float3 I = prd.direction;
@@ -602,7 +620,7 @@ extern "C" __global__ void __closesthit__ch_bayer()
         float f0 = (IOR - 1.0f) / (IOR + 1.0f);
         f0 = f0 * f0;
         float Fr = f0 + (1.0f - f0) * powf(1.0f - cosi, 5.0f);
-        if (rnd(seed) < Fr) {
+        if (next_rand(prd) < Fr) {
             prd.origin = P + N * 1e-3f;
             prd.direction = reflect(I, N);
         } else {
@@ -626,7 +644,7 @@ extern "C" __global__ void __closesthit__ch_bayer()
         }
         if (prd.depth >= params.max_depth - 2) {
             float p = fminf(0.95f, fmaxf(0.05f, prd.throughput));
-            if (rnd(seed) > p) {
+            if (next_rand(prd) > p) {
                 prd.done = 1;
                 return;
             }
@@ -644,11 +662,10 @@ extern "C" __global__ void __closesthit__ch_bayer()
     float diff_prob = 1.0f - spec_prob;
     float kd = albedo * (1.0f - Fr);
 
-    unsigned long long& seed = prd.seed;
     float Lo = 0.0f;
     {
-        float u = (rnd(seed) * 2.0f - 1.0f) * params.light_half.x;
-        float v = (rnd(seed) * 2.0f - 1.0f) * params.light_half.y;
+        float u = (next_rand(prd) * 2.0f - 1.0f) * params.light_half.x;
+        float v = (next_rand(prd) * 2.0f - 1.0f) * params.light_half.y;
         float3 lp = make_float3(params.light_pos.x + u, params.light_pos.y + v, params.light_pos.z);
         float3 L = lp - P;
         float dist2 = fmaxf(dot(L, L), 1e-6f);
@@ -712,9 +729,9 @@ extern "C" __global__ void __closesthit__ch_bayer()
     }
     prd.radiance += emission + Lo;
 
-    float choose = rnd(seed);
+    float choose = next_rand(prd);
     if (choose < spec_prob) {
-        float2 u = make_float2(rnd(seed), rnd(seed));
+        float2 u = make_float2(next_rand(prd), next_rand(prd));
         float3 V = -prd.direction;
         float3 newDir;
         float3 H;
@@ -742,8 +759,8 @@ extern "C" __global__ void __closesthit__ch_bayer()
         prd.prev_pdf_bsdf = pdf * spec_prob;
         prd.prev_pdf_valid = 1;
     } else {
-        float r1 = rnd(seed);
-        float r2 = rnd(seed);
+        float r1 = next_rand(prd);
+        float r2 = next_rand(prd);
         const float phi = 2.0f * CUDART_PI_F * r1;
         const float cosTheta = sqrtf(1.0f - r2);
         const float sinTheta = sqrtf(r2);
@@ -767,7 +784,7 @@ extern "C" __global__ void __closesthit__ch_bayer()
     }
     if (prd.depth >= params.max_depth - 2) {
         float p = fminf(0.95f, fmaxf(0.05f, prd.throughput));
-        if (rnd(seed) > p) {
+        if (next_rand(prd) > p) {
             prd.done = 1;
             return;
         }
@@ -833,6 +850,10 @@ extern "C" __global__ void __raygen__rg()
     prd.seed = seed;
     prd.prev_pdf_bsdf = 0.0f;
     prd.prev_pdf_valid = 0;
+    prd.px = x;
+    prd.py = y;
+    prd.sample = s;
+    prd.rng_dim = 0;
 
     while (!prd.done) {
       prd.radiance = make3(0.0f);
@@ -902,6 +923,10 @@ extern "C" __global__ void __raygen__bayer()
     prd.prev_pdf_bsdf = 0.0f;
     prd.prev_pdf_valid = 0;
     prd.ch = ch;
+    prd.px = x;
+    prd.py = y;
+    prd.sample = s;
+    prd.rng_dim = 0;
 
     while (!prd.done) {
       prd.radiance = 0.0f;
