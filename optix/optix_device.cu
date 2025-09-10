@@ -304,6 +304,29 @@ static __forceinline__ __device__ float3 sample_guided_dir(PRD& prd, const float
     return newDir;
 }
 
+static __forceinline__ __device__ float guiding_pdf(const float3& dir, const float3& Ng)
+{
+    if (params.d_guiding == 0) return 0.f;
+    int idx = guiding_bin(dir, Ng);
+    if (idx < 0) return 0.f;
+    float* table = reinterpret_cast<float*>(params.d_guiding);
+    float sum = 0.f;
+    for (int i = 0; i < GUIDE_BIN_COUNT; ++i) sum += table[i];
+    if (sum <= 0.f) return 0.f;
+    float bin_mass = table[idx] / sum;
+    float bin_area = (2.f * CUDART_PI_F / GUIDE_PHI_RES) * (1.f / GUIDE_THETA_RES);
+    return bin_mass / bin_area;
+}
+
+static __forceinline__ __device__ float guiding_strength()
+{
+    if (params.d_guiding == 0) return 0.f;
+    float* table = reinterpret_cast<float*>(params.d_guiding);
+    float sum = 0.f;
+    for (int i = 0; i < GUIDE_BIN_COUNT; ++i) sum += table[i];
+    return sum / (sum + float(GUIDE_BIN_COUNT));
+}
+
 static __forceinline__ __device__ void update_guiding(const float3& dir, const float3& Ng, float weight)
 {
     if (params.d_guiding == 0) return;
@@ -621,11 +644,12 @@ extern "C" __global__ void __closesthit__ch()
         prd.prev_pdf_valid = 1;
     } else {
         float3 newDir;
-        float pdf_sample;
         float cosTheta;
-        bool guided = (params.d_guiding != 0) && (next_rand(prd) < 0.5f);
+        float pdf_guided = 0.f;
+        float guideWeight = guiding_strength();
+        bool guided = (guideWeight > 0.f) && (next_rand(prd) < guideWeight);
         if (guided) {
-            newDir = sample_guided_dir(prd, Ng, pdf_sample, cosTheta);
+            newDir = sample_guided_dir(prd, Ng, pdf_guided, cosTheta);
         } else {
             float r1 = next_rand(prd);
             float r2 = next_rand(prd);
@@ -636,19 +660,19 @@ extern "C" __global__ void __closesthit__ch()
             float3 tangent, bitangent;
             make_onb(Ng, tangent, bitangent);
             newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
-            pdf_sample = cosTheta * (1.0f / CUDART_PI_F);
+            pdf_guided = guiding_pdf(newDir, Ng);
         }
 
         prd.origin = P + Ng * 1e-3f;
         prd.direction = newDir;
 
-        float uniform_pdf = cosTheta * (1.0f / CUDART_PI_F);
-        float final_pdf = guided ? (0.5f * pdf_sample + 0.5f * uniform_pdf) : pdf_sample;
+        float pdf_uniform = cosTheta * (1.0f / CUDART_PI_F);
+        float final_pdf = guideWeight * pdf_guided + (1.0f - guideWeight) * pdf_uniform;
         prd.throughput = mul(prd.throughput, kd);
         prd.throughput = prd.throughput * (cosTheta / (CUDART_PI_F * final_pdf * diff_prob));
         prd.prev_pdf_bsdf = final_pdf * diff_prob;
         prd.prev_pdf_valid = 1;
-        update_guiding(newDir, Ng, luminance(kd));
+        update_guiding(newDir, Ng, luminance(prd.throughput));
     }
 
     prd.depth++;
