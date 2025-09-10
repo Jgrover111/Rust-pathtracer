@@ -38,6 +38,10 @@
 #define OPTIX_STACK_SIZE_SCALE 1.0f
 #endif
 
+#define GUIDE_PHI_RES 16
+#define GUIDE_THETA_RES 8
+#define GUIDE_BIN_COUNT (GUIDE_PHI_RES * GUIDE_THETA_RES)
+
 // ----- tiny helpers ---------------------------------------------------------
 #define OTK_CHECK(call)                                                          \
   do {                                                                           \
@@ -187,6 +191,7 @@ struct Params
   float3 light_emit;
   float3 light_normal;
   float2 light_half;
+  CUdeviceptr d_guiding;
 };
 
 using RaygenRecord  = SbtRecord<EmptyData>;
@@ -264,6 +269,7 @@ struct State
   // Params
   Params                h_params {};
   CUdeviceptr           d_params = 0;
+  CUdeviceptr           d_guiding = 0;
 
   // Output
   CUdeviceptr           d_out_rgb   = 0; // float3*
@@ -281,6 +287,7 @@ struct State
     if (d_out_rgb)   cuMemFree(d_out_rgb);
     if (d_out_bayer) cuMemFree(d_out_bayer);
     if (d_params)    cuMemFree(d_params);
+    if (d_guiding)   cuMemFree(d_guiding);
     if (copy_stream) cuStreamDestroy(copy_stream);
     if (stream)      cuStreamDestroy(stream);
 
@@ -791,6 +798,7 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.light_emit = make_float3(15.f, 15.f, 15.f); // match emissive ceiling light
   st->h_params.light_normal = normalize3(make_float3(0.f, 0.f, -1.f));
   st->h_params.light_half = make_float2(0.3f, 0.3f);
+  st->h_params.d_guiding = st->d_guiding;
 
   // pipeline
   createPipeline(*st);
@@ -798,9 +806,12 @@ static State* make_state(uint32_t W, uint32_t H)
   // params/output buffers
   size_t rgbBytes    = size_t(W) * size_t(H) * sizeof(float3);
   size_t bayerBytes  = size_t(W) * size_t(H) * sizeof(float);
+  size_t guideBytes  = size_t(GUIDE_BIN_COUNT) * sizeof(float);
 
   CU_CHECK(cuMemAlloc(&st->d_out_rgb,   rgbBytes));
   CU_CHECK(cuMemAlloc(&st->d_out_bayer, bayerBytes));
+  CU_CHECK(cuMemAlloc(&st->d_guiding, guideBytes));
+  CU_CHECK(cuMemsetD8(st->d_guiding, 0, guideBytes));
   CU_CHECK(cuStreamCreate(&st->stream, CU_STREAM_NON_BLOCKING));
   CU_CHECK(cuStreamCreate(&st->copy_stream, CU_STREAM_NON_BLOCKING));
 

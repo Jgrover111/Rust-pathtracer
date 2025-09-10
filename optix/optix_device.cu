@@ -6,6 +6,10 @@
 #include <vector_types.h>
 #include <math_constants.h>
 
+#define GUIDE_PHI_RES 16
+#define GUIDE_THETA_RES 8
+#define GUIDE_BIN_COUNT (GUIDE_PHI_RES * GUIDE_THETA_RES)
+
 // Keep this in sync with optix_wrapper.cpp
 struct Params
 {
@@ -34,6 +38,7 @@ struct Params
   float3                   light_emit;
   float3                   light_normal;
   float2                   light_half;
+  CUdeviceptr              d_guiding;
 };
 
 extern "C" {
@@ -203,6 +208,111 @@ static __forceinline__ __device__ void make_onb(const float3& n, float3& t, floa
   }
 }
 
+// Per-ray data carried through the path tracer.
+// Must be defined before any functions (like sample_guided_dir)
+// that access its members.
+struct PRD {
+    float3 radiance;
+    float3 throughput;
+    float3 origin;
+    float3 direction;
+    unsigned long long seed;
+    int    depth;
+    int    done;
+    // MIS: previous bounce's BSDF pdf and validity flag
+    float  prev_pdf_bsdf;
+    int    prev_pdf_valid;
+    int    px;
+    int    py;
+    int    sample;
+    int    rng_dim;
+};
+
+struct PRDScalar {
+    float  radiance;
+    float  throughput;
+    float3 origin;
+    float3 direction;
+    unsigned long long seed;
+    int    depth;
+    int    done;
+    float  prev_pdf_bsdf;
+    int    prev_pdf_valid;
+    int    ch;
+    int    px;
+    int    py;
+    int    sample;
+    int    rng_dim;
+};
+
+static __forceinline__ __device__ float luminance(const float3& c)
+{
+    return c.x * 0.2126f + c.y * 0.7152f + c.z * 0.0722f;
+}
+
+static __forceinline__ __device__ int guiding_bin(const float3& dir, const float3& Ng)
+{
+    float3 tangent, bitangent;
+    make_onb(Ng, tangent, bitangent);
+    float3 local = make_float3(dot(dir, tangent), dot(dir, bitangent), dot(dir, Ng));
+    if (local.z <= 0.f) return -1;
+    float phi = atan2f(local.y, local.x);
+    if (phi < 0.f) phi += 2.f * CUDART_PI_F;
+    int phi_idx = min(max(int(phi / (2.f * CUDART_PI_F) * GUIDE_PHI_RES), 0), GUIDE_PHI_RES - 1);
+    int mu_idx = min(max(int(local.z * GUIDE_THETA_RES), 0), GUIDE_THETA_RES - 1);
+    return mu_idx * GUIDE_PHI_RES + phi_idx;
+}
+
+static __forceinline__ __device__ float3 sample_guided_dir(PRD& prd, const float3& Ng, float& pdf, float& cosTheta)
+{
+    float* table = reinterpret_cast<float*>(params.d_guiding);
+    float sum = 0.f;
+    for (int i = 0; i < GUIDE_BIN_COUNT; ++i) sum += table[i];
+    if (sum <= 0.f) {
+        float r1 = next_rand(prd);
+        float r2 = next_rand(prd);
+        const float phi = 2.0f * CUDART_PI_F * r1;
+        cosTheta = sqrtf(1.0f - r2);
+        const float sinTheta = sqrtf(r2);
+        float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+        float3 t, b;
+        make_onb(Ng, t, b);
+        float3 newDir = normalize(localDir.x * t + localDir.y * b + localDir.z * Ng);
+        pdf = cosTheta * (1.0f / CUDART_PI_F);
+        return newDir;
+    }
+    float r = next_rand(prd) * sum;
+    float acc = 0.f;
+    int idx = GUIDE_BIN_COUNT - 1;
+    for (int i = 0; i < GUIDE_BIN_COUNT; ++i) {
+        acc += table[i];
+        if (r <= acc) { idx = i; break; }
+    }
+    int phi_idx = idx % GUIDE_PHI_RES;
+    int mu_idx  = idx / GUIDE_PHI_RES;
+    float phi = (phi_idx + next_rand(prd)) / float(GUIDE_PHI_RES) * 2.f * CUDART_PI_F;
+    float mu  = (mu_idx + next_rand(prd)) / float(GUIDE_THETA_RES);
+    cosTheta = mu;
+    float sinTheta = sqrtf(fmaxf(0.f, 1.f - cosTheta * cosTheta));
+    float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+    float3 t, b;
+    make_onb(Ng, t, b);
+    float3 newDir = normalize(localDir.x * t + localDir.y * b + localDir.z * Ng);
+    float bin_mass = table[idx] / sum;
+    float bin_area = (2.f * CUDART_PI_F / GUIDE_PHI_RES) * (1.f / GUIDE_THETA_RES);
+    pdf = bin_mass / bin_area;
+    return newDir;
+}
+
+static __forceinline__ __device__ void update_guiding(const float3& dir, const float3& Ng, float weight)
+{
+    if (params.d_guiding == 0) return;
+    int idx = guiding_bin(dir, Ng);
+    if (idx < 0) return;
+    float* table = reinterpret_cast<float*>(params.d_guiding);
+    atomicAdd(&table[idx], weight);
+}
+
 static __forceinline__ __device__ float3 reflect(const float3& i, const float3& n)
 {
   return i - 2.0f * dot(i, n) * n;
@@ -291,42 +401,6 @@ static __forceinline__ __device__ T* unpackPtr() {
   uint64_t uptr = (u1 << 32) | u0;
   return reinterpret_cast<T*>(uptr);
 }
-
-// --- per-ray data ----------------------------------------------------------
-
-struct PRD {
-    float3 radiance;
-    float3 throughput;
-    float3 origin;
-    float3 direction;
-    unsigned long long seed;
-    int    depth;
-    int    done;
-    // MIS: previous bounce's BSDF pdf and validity flag
-    float  prev_pdf_bsdf;
-    int    prev_pdf_valid;
-    int    px;
-    int    py;
-    int    sample;
-    int    rng_dim;
-};
-
-struct PRDScalar {
-    float  radiance;
-    float  throughput;
-    float3 origin;
-    float3 direction;
-    unsigned long long seed;
-    int    depth;
-    int    done;
-    float  prev_pdf_bsdf;
-    int    prev_pdf_valid;
-    int    ch;
-    int    px;
-    int    py;
-    int    sample;
-    int    rng_dim;
-};
 
 // --- access helpers for CUdeviceptr arrays --------------------------------
 
@@ -546,22 +620,35 @@ extern "C" __global__ void __closesthit__ch()
         prd.prev_pdf_bsdf = pdf * spec_prob;
         prd.prev_pdf_valid = 1;
     } else {
-        float r1 = next_rand(prd);
-        float r2 = next_rand(prd);
-        const float phi = 2.0f * CUDART_PI_F * r1;
-        const float cosTheta = sqrtf(1.0f - r2);
-        const float sinTheta = sqrtf(r2);
-        float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
-
-        float3 tangent, bitangent;
-        make_onb(Ng, tangent, bitangent);
-        float3 newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
+        float3 newDir;
+        float pdf_sample;
+        float cosTheta;
+        bool guided = (params.d_guiding != 0) && (next_rand(prd) < 0.5f);
+        if (guided) {
+            newDir = sample_guided_dir(prd, Ng, pdf_sample, cosTheta);
+        } else {
+            float r1 = next_rand(prd);
+            float r2 = next_rand(prd);
+            const float phi = 2.0f * CUDART_PI_F * r1;
+            cosTheta = sqrtf(1.0f - r2);
+            const float sinTheta = sqrtf(r2);
+            float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+            float3 tangent, bitangent;
+            make_onb(Ng, tangent, bitangent);
+            newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
+            pdf_sample = cosTheta * (1.0f / CUDART_PI_F);
+        }
 
         prd.origin = P + Ng * 1e-3f;
         prd.direction = newDir;
-        prd.throughput = mul(prd.throughput, kd / diff_prob);
-        prd.prev_pdf_bsdf = cosTheta * (1.0f / CUDART_PI_F) * diff_prob;
+
+        float uniform_pdf = cosTheta * (1.0f / CUDART_PI_F);
+        float final_pdf = guided ? (0.5f * pdf_sample + 0.5f * uniform_pdf) : pdf_sample;
+        prd.throughput = mul(prd.throughput, kd);
+        prd.throughput = prd.throughput * (cosTheta / (CUDART_PI_F * final_pdf * diff_prob));
+        prd.prev_pdf_bsdf = final_pdf * diff_prob;
         prd.prev_pdf_valid = 1;
+        update_guiding(newDir, Ng, luminance(kd));
     }
 
     prd.depth++;
