@@ -401,15 +401,15 @@ static void buildCornell(State& s)
   // optional: a short box (white)
   {
     float z0 = 0.001f, z1 = 0.6f;
-    float3 p0 = make_float3(-0.424f,  0.0f, z0);
-    float3 p1 = make_float3( 0.0f, -0.424f, z0);
-    float3 p2 = make_float3( 0.424f, 0.0f, z0);
-    float3 p3 = make_float3( 0.0f,  0.424f, z0);
+    float3 p0 = make_float3(0.076f, -0.5f, z0);
+    float3 p1 = make_float3(0.5f, -0.924f, z0);
+    float3 p2 = make_float3(0.924f, -0.5f, z0);
+    float3 p3 = make_float3(0.5f, -0.076f, z0);
 
-    float3 q0 = make_float3(-0.424f,  0.0f, z1);
-    float3 q1 = make_float3( 0.0f, -0.424f, z1);
-    float3 q2 = make_float3( 0.424f, 0.0f, z1);
-    float3 q3 = make_float3( 0.0f,  0.424f, z1);
+    float3 q0 = make_float3(0.076f, -0.5f, z1);
+    float3 q1 = make_float3(0.5f, -0.924f, z1);
+    float3 q2 = make_float3(0.924f, -0.5f, z1);
+    float3 q3 = make_float3(0.5f, -0.076f, z1);
 
     auto addRect = [&](float3 a,float3 b,float3 c,float3 d){
       addQuad(s.vertices, s.indices, a,b,c,d);
