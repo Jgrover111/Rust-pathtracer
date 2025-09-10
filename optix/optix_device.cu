@@ -195,6 +195,15 @@ static __forceinline__ __device__ float3 reflect(const float3& i, const float3& 
   return i - 2.0f * dot(i, n) * n;
 }
 
+static __forceinline__ __device__ bool refract(const float3& i, const float3& n, float eta, float3& t)
+{
+  float cosi = dot(-n, i);
+  float k = 1.0f - eta * eta * (1.0f - cosi * cosi);
+  if (k < 0.0f) return false;
+  t = eta * i + (eta * cosi - sqrtf(k)) * n;
+  return true;
+}
+
 static __forceinline__ __device__ float3 fresnel_schlick(float cosTheta, const float3& F0)
 {
   return F0 + (make3(1.0f) - F0) * powf(fmaxf(0.0f, 1.0f - cosTheta), 5.0f);
@@ -366,6 +375,49 @@ extern "C" __global__ void __closesthit__ch()
     const float Roughness = hg->Roughness;
     const float IOR = hg->IOR;
     const float3 Emission = hg->Emission;
+    const float Transmission = hg->Transmission;
+
+    if (Transmission > 0.0f) {
+        unsigned long long& seed = prd.seed;
+        float3 N = dot(prd.direction, Ng) < 0.0f ? Ng : -Ng;
+        float eta = dot(prd.direction, Ng) < 0.0f ? 1.0f / IOR : IOR;
+        float3 I = prd.direction;
+        float cosi = fmaxf(dot(-N, I), 0.0f);
+        float f0 = (IOR - 1.0f) / (IOR + 1.0f);
+        f0 = f0 * f0;
+        float Fr = f0 + (1.0f - f0) * powf(1.0f - cosi, 5.0f);
+        if (rnd(seed) < Fr) {
+            prd.origin = P + N * 1e-3f;
+            prd.direction = reflect(I, N);
+        } else {
+            float3 T;
+            if (!refract(I, N, eta, T)) {
+                prd.origin = P + N * 1e-3f;
+                prd.direction = reflect(I, N);
+            } else {
+                prd.origin = P - N * 1e-3f;
+                prd.direction = normalize3(T);
+                prd.throughput = mul(prd.throughput, Base_colour);
+            }
+        }
+        prd.radiance += Emission;
+        prd.prev_pdf_valid = 0;
+        prd.prev_pdf_bsdf = 0.0f;
+        prd.depth++;
+        if (prd.depth >= params.max_depth) {
+            prd.done = 1;
+            return;
+        }
+        if (prd.depth >= params.max_depth - 2) {
+            float p = fmaxf(prd.throughput.x, fmaxf(prd.throughput.y, prd.throughput.z));
+            if (rnd(seed) > p) {
+                prd.done = 1;
+                return;
+            }
+            prd.throughput = prd.throughput / fmaxf(p, 1e-3f);
+        }
+        return;
+    }
 
     float f0 = (IOR - 1.0f) / (IOR + 1.0f);
     f0 = f0 * f0;
@@ -535,10 +587,53 @@ extern "C" __global__ void __closesthit__ch_bayer()
     const float Roughness = hg->Roughness;
     const float IOR = hg->IOR;
     const float3 Emission = hg->Emission;
+    const float Transmission = hg->Transmission;
 
     const int ch = prd.ch;
     float albedo = select(Base_colour, ch);
     float emission = select(Emission, ch);
+
+    if (Transmission > 0.0f) {
+        unsigned long long& seed = prd.seed;
+        float3 N = dot(prd.direction, Ng) < 0.0f ? Ng : -Ng;
+        float eta = dot(prd.direction, Ng) < 0.0f ? 1.0f / IOR : IOR;
+        float3 I = prd.direction;
+        float cosi = fmaxf(dot(-N, I), 0.0f);
+        float f0 = (IOR - 1.0f) / (IOR + 1.0f);
+        f0 = f0 * f0;
+        float Fr = f0 + (1.0f - f0) * powf(1.0f - cosi, 5.0f);
+        if (rnd(seed) < Fr) {
+            prd.origin = P + N * 1e-3f;
+            prd.direction = reflect(I, N);
+        } else {
+            float3 T;
+            if (!refract(I, N, eta, T)) {
+                prd.origin = P + N * 1e-3f;
+                prd.direction = reflect(I, N);
+            } else {
+                prd.origin = P - N * 1e-3f;
+                prd.direction = normalize3(T);
+                prd.throughput *= albedo;
+            }
+        }
+        prd.radiance += emission;
+        prd.prev_pdf_valid = 0;
+        prd.prev_pdf_bsdf = 0.0f;
+        prd.depth++;
+        if (prd.depth >= params.max_depth) {
+            prd.done = 1;
+            return;
+        }
+        if (prd.depth >= params.max_depth - 2) {
+            float p = fminf(0.95f, fmaxf(0.05f, prd.throughput));
+            if (rnd(seed) > p) {
+                prd.done = 1;
+                return;
+            }
+            prd.throughput *= (1.0f / p);
+        }
+        return;
+    }
 
     float f0 = (IOR - 1.0f) / (IOR + 1.0f);
     f0 = f0 * f0;
