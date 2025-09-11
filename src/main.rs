@@ -16,6 +16,7 @@ extern "C" {
         h: c_int,
         spp: c_int,
         max_depth: c_int,
+        noise_threshold: f32,
         out_rgb: *mut f32,
     ) -> c_int;
     fn optix_render_bayer_f32(
@@ -23,6 +24,7 @@ extern "C" {
         h: c_int,
         spp: c_int,
         max_depth: c_int,
+        noise_threshold: f32,
         pattern: c_int,
         out_raw: *mut f32,
     ) -> c_int;
@@ -43,8 +45,15 @@ extern "C" {
 /// # Returns
 /// Zero on success, non-zero on failure.
 #[inline]
-fn ffi_render_rgb(w: i32, h: i32, spp: i32, max_depth: i32, out: *mut f32) -> c_int {
-    unsafe { optix_render_rgb(w, h, spp, max_depth, out) }
+fn ffi_render_rgb(
+    w: i32,
+    h: i32,
+    spp: i32,
+    max_depth: i32,
+    noise_threshold: f32,
+    out: *mut f32,
+) -> c_int {
+    unsafe { optix_render_rgb(w, h, spp, max_depth, noise_threshold, out) }
 }
 /// Render a Bayer mosaic image using the GPU backend.
 ///
@@ -63,10 +72,11 @@ fn ffi_render_bayer_f32(
     h: i32,
     spp: i32,
     max_depth: i32,
+    noise_threshold: f32,
     pat: i32,
     out: *mut f32,
 ) -> c_int {
-    unsafe { optix_render_bayer_f32(w, h, spp, max_depth, pat, out) }
+    unsafe { optix_render_bayer_f32(w, h, spp, max_depth, noise_threshold, pat, out) }
 }
 /// Allocate pinned host memory using the GPU API.
 ///
@@ -557,9 +567,10 @@ fn save_avif_rec2100_pq_from_acescg(
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 100;
+    let spp = 1024;
     let max_depth = 32;
     let pattern = 0;
+    let noise_threshold = 0.01_f32; // 0 disables adaptive sampling
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
     let bayer_bytes = (w * h) as usize * std::mem::size_of::<f32>();
@@ -571,12 +582,15 @@ fn main() {
     let bayer = unsafe { std::slice::from_raw_parts_mut(bayer_ptr, (w * h) as usize) };
 
     let t0 = Instant::now();
-    assert_eq!(ffi_render_rgb(w, h, spp, max_depth, rgb_ptr), 0);
+    assert_eq!(
+        ffi_render_rgb(w, h, spp, max_depth, noise_threshold, rgb_ptr),
+        0
+    );
     let t_rgb = t0.elapsed();
 
     let t1 = Instant::now();
     assert_eq!(
-        ffi_render_bayer_f32(w, h, spp, max_depth, pattern, bayer_ptr),
+        ffi_render_bayer_f32(w, h, spp, max_depth, noise_threshold, pattern, bayer_ptr,),
         0
     );
     let t_raw = t1.elapsed();

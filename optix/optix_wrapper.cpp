@@ -172,6 +172,7 @@ struct Params
   int         max_depth;
   int         frame;
   int         bayer_pattern;  // 0..3
+  float       noise_threshold;
 
   // camera
   float3 cam_eye;
@@ -823,6 +824,7 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.max_depth = 5;
   st->h_params.frame     = 0;
   st->h_params.bayer_pattern = 0;
+  st->h_params.noise_threshold = 0.f;
 
   // Pin host params so subsequent uploads can use async copies.
   CU_CHECK(cuMemHostRegister(&st->h_params, sizeof(Params), 0));
@@ -889,7 +891,7 @@ void  optix_ctx_set_camera(void* handle,
   CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
 }
 
-static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float* out_rgb)
+static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float noise_threshold, float* out_rgb)
 {
     if (!out_rgb) return -1;
     // same pattern you use elsewhere: update Params on device, launch, copy back
@@ -898,6 +900,7 @@ static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float* out
     s.h_params.frame++;
     s.h_params.spp = spp;
     s.h_params.max_depth = max_depth;
+    s.h_params.noise_threshold = noise_threshold;
     // If your renderer needs any per-frame fields set, do it here.
     // e.g., s.h_params.bayer_pattern = s.bayer_pattern;   // (RGB path usually not needed)
 
@@ -933,7 +936,7 @@ static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float* out
     return 0;
 }
 
-static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, float* out_raw)
+static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, float noise_threshold, float* out_raw)
 {
     if (!out_raw) return -1;
     auto& s = *reinterpret_cast<State*>(handle);
@@ -941,6 +944,7 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, floa
     s.h_params.frame++;
     s.h_params.spp = spp;
     s.h_params.max_depth = max_depth;
+    s.h_params.noise_threshold = noise_threshold;
     s.h_params.bayer_pattern = s.bayer_pattern;  // keep whatever you already store in s.bayer_pattern
     CU_CHECK( cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream) );
     // Disable RGB output for this launch by zeroing the device-side pointer.
@@ -951,12 +955,15 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, floa
     CU_CHECK(cuEventCreate(&done, CU_EVENT_DEFAULT));
     CU_CHECK(cuEventCreate(&copy_done, CU_EVENT_DEFAULT));
 
+    // Use the RGB SBT so that the raygen program can still compute RGB
+    // variance for adaptive sampling, even when only a Bayer image is
+    // requested.
     OTK_CHECK( optixLaunch(
         s.pipeline,
         /*stream*/ s.stream,
         /*params*/ s.d_params,
         /*paramsSize*/ sizeof(Params),
-        /*SBT*/ &s.sbt_bayer,
+        /*SBT*/ &s.sbt_rgb,
         /*w,h,d*/ s.width, s.height, 1) );
 
     CU_CHECK(cuEventRecord(done, s.stream));
@@ -996,18 +1003,18 @@ static void ensure_handle(int w, int h)
 }
 
 extern "C" __declspec(dllexport)
-int optix_render_rgb(int w, int h, int spp, int max_depth, float* out_rgb)
+int optix_render_rgb(int w, int h, int spp, int max_depth, float noise_threshold, float* out_rgb)
 {
     ensure_handle(w, h);
-    return optix_ctx_render_rgb(g_handle, spp, max_depth, out_rgb);
+    return optix_ctx_render_rgb(g_handle, spp, max_depth, noise_threshold, out_rgb);
 }
 
 extern "C" __declspec(dllexport)
-int optix_render_bayer_f32(int w, int h, int spp, int max_depth, int pat, float* out_raw)
+int optix_render_bayer_f32(int w, int h, int spp, int max_depth, float noise_threshold, int pat, float* out_raw)
 {
     ensure_handle(w, h);
     optix_ctx_set_bayer(g_handle, pat);
-    return optix_ctx_render_bayer_f32(g_handle, spp, max_depth, out_raw);
+    return optix_ctx_render_bayer_f32(g_handle, spp, max_depth, noise_threshold, out_raw);
 }
 extern "C" __declspec(dllexport)
 void optix_synchronize()

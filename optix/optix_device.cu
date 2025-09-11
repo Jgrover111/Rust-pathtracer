@@ -21,6 +21,7 @@ struct Params
   int                      max_depth;
   int                      frame;
   int                      bayer_pattern; // 0:RGGB,1:BGGR,2:GRBG,3:GBRG
+  float                    noise_threshold;
   float3                   cam_eye;
   float3                   cam_u;
   float3                   cam_v;
@@ -940,16 +941,22 @@ extern "C" __global__ void __raygen__rg()
   // Trace radiance
   const float3 org = params.cam_eye;
   float3 sum_rgb = make3(0.0f);
+  float3 sum_sq_rgb = make3(0.0f);
   float sum_bayer = 0.0f;
-  const bool do_rgb   = params.out_rgb   != 0;
-  const bool do_bayer = params.out_bayer != 0;
+  float sum_sq_bayer = 0.0f;
+  // Track RGB variance even if we are not writing an RGB image to ensure
+  // adaptive sampling decisions consider all colour channels.
+  const bool write_rgb   = params.out_rgb   != 0;
+  const bool write_bayer = params.out_bayer != 0;
   const int ch = bayer_channel_for(x, y, params.bayer_pattern);
   unsigned long long seed =
       ((unsigned long long)params.frame * 9781ULL) ^
       ((unsigned long long)dst * 6271ULL) ^
       0x853c49e6748fea9bULL;
 
+  int samples = 0;
   for (int s = 0; s < params.spp; ++s) {
+    samples++;
     PRD prd;
     prd.radiance = make3(0.0f);
     prd.throughput = make3(1.0f);
@@ -980,25 +987,52 @@ extern "C" __global__ void __raygen__rg()
         2,
         0,
         u0, u1);
-      if (do_rgb)
-        sum_rgb += prd.radiance * prd.throughput;
-      if (do_bayer) {
+      // Always accumulate RGB contributions for variance estimation
+      float3 contrib_rgb = prd.radiance * prd.throughput;
+      sum_rgb += contrib_rgb;
+      sum_sq_rgb += contrib_rgb * contrib_rgb;
+      if (write_bayer) {
         float throughput_ch = (ch==0 ? prd.throughput.x : (ch==1 ? prd.throughput.y : prd.throughput.z));
-        sum_bayer += (ch==0 ? prd.radiance.x : (ch==1 ? prd.radiance.y : prd.radiance.z)) * throughput_ch;
-	  }
+        float contrib = (ch==0 ? prd.radiance.x : (ch==1 ? prd.radiance.y : prd.radiance.z)) * throughput_ch;
+        sum_bayer += contrib;
+        sum_sq_bayer += contrib * contrib;
+      }
+    }
+
+    // Adaptive sampling based on relative luminance standard deviation
+    if (params.noise_threshold > 0.f && samples >= 4) {
+      float3 mean_rgb = sum_rgb / float(samples);
+      float3 m2_rgb = sum_sq_rgb / float(samples);
+      float3 var_rgb = m2_rgb - mean_rgb * mean_rgb;
+      float3 w = make_float3(0.2126f, 0.7152f, 0.0722f);
+      float lum = dot3(mean_rgb, w);
+      float lum_var = dot3(var_rgb, w);
+      float stddev_rgb = sqrtf(fmaxf(lum_var, 0.f));
+      bool rgb_done = (stddev_rgb / fmaxf(lum, 1e-6f)) < params.noise_threshold;
+
+      bool bayer_done = true;
+      if (write_bayer) {
+        float mean_bayer = sum_bayer / float(samples);
+        float m2_bayer = sum_sq_bayer / float(samples);
+        float var_bayer = m2_bayer - mean_bayer * mean_bayer;
+        float stddev_bayer = sqrtf(fmaxf(var_bayer, 0.f));
+        bayer_done = (stddev_bayer / fmaxf(mean_bayer, 1e-6f)) < params.noise_threshold;
+      }
+      if (rgb_done && bayer_done)
+        break;
     }
 
     seed = prd.seed;
   }
 
   // Write outputs
-  if (do_rgb) {
-                float3 rad = sum_rgb / float(params.spp);
+  if (write_rgb) {
+    float3 rad = sum_rgb / float(samples);
     float3* out = ptr_at<float3>(params.out_rgb);
     out[dst] = rad;
   }
-  if (do_bayer) {
-                float rad = fmaxf(sum_bayer / float(params.spp), 0.f);
+  if (write_bayer) {
+    float rad = fmaxf(sum_bayer / float(samples), 0.f);
     float* out = ptr_at<float>(params.out_bayer);
     out[dst] = rad;
   }
@@ -1015,13 +1049,16 @@ extern "C" __global__ void __raygen__bayer()
 
   const float3 org = params.cam_eye;
   float sum = 0.0f;
+  float sum_sq = 0.0f;
   const int ch = bayer_channel_for(x, y, params.bayer_pattern);
   unsigned long long seed =
       ((unsigned long long)params.frame * 9781ULL) ^
       ((unsigned long long)dst * 6271ULL) ^
       0x37c4d1e74c3fa19bULL;
 
+  int samples = 0;
   for (int s = 0; s < params.spp; ++s) {
+    samples++;
     PRDScalar prd;
     prd.radiance = 0.0f;
     prd.throughput = 1.0f;
@@ -1053,13 +1090,24 @@ extern "C" __global__ void __raygen__bayer()
         2,
         0,
         u0, u1);
-      sum += prd.radiance * prd.throughput;
+      float contrib = prd.radiance * prd.throughput;
+      sum += contrib;
+      sum_sq += contrib * contrib;
+    }
+
+    if (params.noise_threshold > 0.f && samples >= 4) {
+      float mean = sum / float(samples);
+      float m2 = sum_sq / float(samples);
+      float var = m2 - mean * mean;
+      float stddev = sqrtf(fmaxf(var, 0.f));
+      if (stddev / fmaxf(mean, 1e-6f) < params.noise_threshold)
+        break;
     }
 
     seed = prd.seed;
   }
 
-  float rad = fmaxf(sum / float(params.spp), 0.f);
+  float rad = fmaxf(sum / float(samples), 0.f);
   float* out = ptr_at<float>(params.out_bayer);
   out[dst] = rad;
 }
