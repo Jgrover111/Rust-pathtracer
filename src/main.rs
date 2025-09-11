@@ -17,6 +17,7 @@ extern "C" {
         spp: c_int,
         max_depth: c_int,
         noise_threshold: f32,
+        min_adaptive_samples: c_int,
         out_rgb: *mut f32,
     ) -> c_int;
     fn optix_render_bayer_f32(
@@ -25,6 +26,7 @@ extern "C" {
         spp: c_int,
         max_depth: c_int,
         noise_threshold: f32,
+        min_adaptive_samples: c_int,
         pattern: c_int,
         out_raw: *mut f32,
     ) -> c_int;
@@ -40,6 +42,7 @@ extern "C" {
 /// - `w`: Image width in pixels. Must be positive.
 /// - `h`: Image height in pixels. Must be positive.
 /// - `spp`: Samples per pixel. Must be positive.
+/// - `min_adaptive_samples`: Minimum samples per pixel before adaptive termination.
 /// - `out`: Pointer to a buffer of at least `w * h * 3` `f32` values.
 ///
 /// # Returns
@@ -51,9 +54,20 @@ fn ffi_render_rgb(
     spp: i32,
     max_depth: i32,
     noise_threshold: f32,
+    min_adaptive_samples: i32,
     out: *mut f32,
 ) -> c_int {
-    unsafe { optix_render_rgb(w, h, spp, max_depth, noise_threshold, out) }
+    unsafe {
+        optix_render_rgb(
+            w,
+            h,
+            spp,
+            max_depth,
+            noise_threshold,
+            min_adaptive_samples,
+            out,
+        )
+    }
 }
 /// Render a Bayer mosaic image using the GPU backend.
 ///
@@ -62,6 +76,7 @@ fn ffi_render_rgb(
 /// - `h`: Image height in pixels. Must be positive.
 /// - `spp`: Samples per pixel. Must be positive.
 /// - `pat`: Bayer pattern index.
+/// - `min_adaptive_samples`: Minimum samples per pixel before adaptive termination.
 /// - `out`: Pointer to a buffer of at least `w * h` `f32` values.
 ///
 /// # Returns
@@ -73,10 +88,22 @@ fn ffi_render_bayer_f32(
     spp: i32,
     max_depth: i32,
     noise_threshold: f32,
+    min_adaptive_samples: i32,
     pat: i32,
     out: *mut f32,
 ) -> c_int {
-    unsafe { optix_render_bayer_f32(w, h, spp, max_depth, noise_threshold, pat, out) }
+    unsafe {
+        optix_render_bayer_f32(
+            w,
+            h,
+            spp,
+            max_depth,
+            noise_threshold,
+            min_adaptive_samples,
+            pat,
+            out,
+        )
+    }
 }
 /// Allocate pinned host memory using the GPU API.
 ///
@@ -571,6 +598,7 @@ fn main() {
     let max_depth = 32;
     let pattern = 0;
     let noise_threshold = 0.01_f32; // 0 disables adaptive sampling
+    let min_adaptive_samples = 32;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
     let bayer_bytes = (w * h) as usize * std::mem::size_of::<f32>();
@@ -583,14 +611,31 @@ fn main() {
 
     let t0 = Instant::now();
     assert_eq!(
-        ffi_render_rgb(w, h, spp, max_depth, noise_threshold, rgb_ptr),
+        ffi_render_rgb(
+            w,
+            h,
+            spp,
+            max_depth,
+            noise_threshold,
+            min_adaptive_samples,
+            rgb_ptr,
+        ),
         0
     );
     let t_rgb = t0.elapsed();
 
     let t1 = Instant::now();
     assert_eq!(
-        ffi_render_bayer_f32(w, h, spp, max_depth, noise_threshold, pattern, bayer_ptr,),
+        ffi_render_bayer_f32(
+            w,
+            h,
+            spp,
+            max_depth,
+            noise_threshold,
+            min_adaptive_samples,
+            pattern,
+            bayer_ptr,
+        ),
         0
     );
     let t_raw = t1.elapsed();

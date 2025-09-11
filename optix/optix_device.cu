@@ -20,6 +20,7 @@ struct Params
 {
   CUdeviceptr              out_rgb;      // float3*
   CUdeviceptr              out_bayer;    // float*
+  CUdeviceptr              noise_map;    // float*
   int                      width;
   int                      height;
   int                      spp;
@@ -27,6 +28,7 @@ struct Params
   int                      frame;
   int                      bayer_pattern; // 0:RGGB,1:BGGR,2:GRBG,3:GBRG
   float                    noise_threshold;
+  int                      min_adaptive_samples;
   float3                   cam_eye;
   float3                   cam_u;
   float3                   cam_v;
@@ -436,6 +438,17 @@ static __forceinline__ __device__ T* unpackPtr() {
 template<typename T>
 static __forceinline__ __device__ T* ptr_at(CUdeviceptr p) {
   return reinterpret_cast<T*>(p);
+}
+
+static __forceinline__ __device__ float atomicMaxf(float* addr, float val) {
+  int* addr_as_i = reinterpret_cast<int*>(addr);
+  int old = *addr_as_i, assumed;
+  if (__int_as_float(old) >= val) return __int_as_float(old);
+  do {
+    assumed = old;
+    old = atomicCAS(addr_as_i, assumed, __float_as_int(val));
+  } while (__int_as_float(old) < val);
+  return __int_as_float(old);
 }
 
 // --- Miss programs ---------------------------------------------------------
@@ -945,10 +958,13 @@ extern "C" __global__ void __raygen__rg()
 
   // Trace radiance
   const float3 org = params.cam_eye;
-  float3 sum_rgb = make3(0.0f);
-  float3 sum_sq_rgb = make3(0.0f);
-  float sum_bayer = 0.0f;
-  float sum_sq_bayer = 0.0f;
+  // Track running means and variances using Welford's algorithm.
+  // We maintain RGB statistics even if only a Bayer image is requested so that
+  // adaptive sampling decisions take all colour channels into account.
+  float3 mean_rgb = make3(0.0f);
+  float3 m2_rgb = make3(0.0f);
+  float mean_bayer = 0.0f;
+  float m2_bayer = 0.0f;
   // Track RGB variance even if we are not writing an RGB image to ensure
   // adaptive sampling decisions consider all colour channels.
   const bool write_rgb   = params.out_rgb   != 0;
@@ -994,36 +1010,62 @@ extern "C" __global__ void __raygen__rg()
         u0, u1);
       // Always accumulate RGB contributions for variance estimation
       float3 contrib_rgb = prd.radiance * prd.throughput;
-      sum_rgb += contrib_rgb;
-      sum_sq_rgb += contrib_rgb * contrib_rgb;
+      float3 delta_rgb = contrib_rgb - mean_rgb;
+      mean_rgb += delta_rgb / float(samples);
+      float3 delta2_rgb = contrib_rgb - mean_rgb;
+      m2_rgb += delta_rgb * delta2_rgb;
       if (write_bayer) {
-        float throughput_ch = (ch==0 ? prd.throughput.x : (ch==1 ? prd.throughput.y : prd.throughput.z));
-        float contrib = (ch==0 ? prd.radiance.x : (ch==1 ? prd.radiance.y : prd.radiance.z)) * throughput_ch;
-        sum_bayer += contrib;
-        sum_sq_bayer += contrib * contrib;
+        float throughput_ch =
+            (ch == 0 ? prd.throughput.x : (ch == 1 ? prd.throughput.y : prd.throughput.z));
+        float contrib =
+            (ch == 0 ? prd.radiance.x : (ch == 1 ? prd.radiance.y : prd.radiance.z)) *
+            throughput_ch;
+        float delta_bayer = contrib - mean_bayer;
+        mean_bayer += delta_bayer / float(samples);
+        float delta2_bayer = contrib - mean_bayer;
+        m2_bayer += delta_bayer * delta2_bayer;
       }
     }
 
-    // Adaptive sampling based on relative luminance standard deviation
-    if (params.noise_threshold > 0.f && samples >= 4) {
-      float3 mean_rgb = sum_rgb / float(samples);
-      float3 m2_rgb = sum_sq_rgb / float(samples);
-      float3 var_rgb = m2_rgb - mean_rgb * mean_rgb;
+    // Adaptive sampling that also considers neighbouring pixel variance
+    if (params.noise_threshold > 0.f && samples >= params.min_adaptive_samples) {
+      float3 var_rgb = m2_rgb / float(samples - 1);
       float3 w = make_float3(0.2126f, 0.7152f, 0.0722f);
       float lum = dot3(mean_rgb, w);
       float lum_var = dot3(var_rgb, w);
       float stddev_rgb = sqrtf(fmaxf(lum_var, 0.f));
-      bool rgb_done = (stddev_rgb / fmaxf(lum, 1e-6f)) < params.noise_threshold;
+      float noise = stddev_rgb / fmaxf(lum, 1e-6f);
 
-      bool bayer_done = true;
       if (write_bayer) {
-        float mean_bayer = sum_bayer / float(samples);
-        float m2_bayer = sum_sq_bayer / float(samples);
-        float var_bayer = m2_bayer - mean_bayer * mean_bayer;
+        float var_bayer = m2_bayer / float(samples - 1);
         float stddev_bayer = sqrtf(fmaxf(var_bayer, 0.f));
-        bayer_done = (stddev_bayer / fmaxf(mean_bayer, 1e-6f)) < params.noise_threshold;
+        float noise_bayer = stddev_bayer / fmaxf(mean_bayer, 1e-6f);
+        noise = fmaxf(noise, noise_bayer);
       }
-      if (rgb_done && bayer_done)
+
+      float* nm = ptr_at<float>(params.noise_map);
+      atomicMaxf(&nm[dst], noise);
+      if (x > 0) atomicMaxf(&nm[dst - 1], noise);
+      if (x + 1 < W) atomicMaxf(&nm[dst + 1], noise);
+      if (y > 0) atomicMaxf(&nm[dst - W], noise);
+      if (y + 1 < H) atomicMaxf(&nm[dst + W], noise);
+      if (x > 0 && y > 0) atomicMaxf(&nm[dst - W - 1], noise);
+      if (x + 1 < W && y > 0) atomicMaxf(&nm[dst - W + 1], noise);
+      if (x > 0 && y + 1 < H) atomicMaxf(&nm[dst + W - 1], noise);
+      if (x + 1 < W && y + 1 < H) atomicMaxf(&nm[dst + W + 1], noise);
+
+      float max_noise = noise;
+      max_noise = fmaxf(max_noise, nm[dst]);
+      if (x > 0) max_noise = fmaxf(max_noise, nm[dst - 1]);
+      if (x + 1 < W) max_noise = fmaxf(max_noise, nm[dst + 1]);
+      if (y > 0) max_noise = fmaxf(max_noise, nm[dst - W]);
+      if (y + 1 < H) max_noise = fmaxf(max_noise, nm[dst + W]);
+      if (x > 0 && y > 0) max_noise = fmaxf(max_noise, nm[dst - W - 1]);
+      if (x + 1 < W && y > 0) max_noise = fmaxf(max_noise, nm[dst - W + 1]);
+      if (x > 0 && y + 1 < H) max_noise = fmaxf(max_noise, nm[dst + W - 1]);
+      if (x + 1 < W && y + 1 < H) max_noise = fmaxf(max_noise, nm[dst + W + 1]);
+
+      if (max_noise < params.noise_threshold)
         break;
     }
 
@@ -1032,14 +1074,12 @@ extern "C" __global__ void __raygen__rg()
 
   // Write outputs
   if (write_rgb) {
-    float3 rad = sum_rgb / float(samples);
     float3* out = ptr_at<float3>(params.out_rgb);
-    out[dst] = rad;
+    out[dst] = mean_rgb;
   }
   if (write_bayer) {
-    float rad = fmaxf(sum_bayer / float(samples), 0.f);
     float* out = ptr_at<float>(params.out_bayer);
-    out[dst] = rad;
+    out[dst] = fmaxf(mean_bayer, 0.f);
   }
 }
 
@@ -1053,8 +1093,8 @@ extern "C" __global__ void __raygen__bayer()
   const int    dst = y * W + x;
 
   const float3 org = params.cam_eye;
-  float sum = 0.0f;
-  float sum_sq = 0.0f;
+  float mean = 0.0f;
+  float m2 = 0.0f;
   const int ch = bayer_channel_for(x, y, params.bayer_pattern);
   unsigned long long seed =
       ((unsigned long long)params.frame * 9781ULL) ^
@@ -1096,23 +1136,46 @@ extern "C" __global__ void __raygen__bayer()
         0,
         u0, u1);
       float contrib = prd.radiance * prd.throughput;
-      sum += contrib;
-      sum_sq += contrib * contrib;
+      float delta = contrib - mean;
+      mean += delta / float(samples);
+      float delta2 = contrib - mean;
+      m2 += delta * delta2;
     }
 
-    if (params.noise_threshold > 0.f && samples >= 4) {
-      float mean = sum / float(samples);
-      float m2 = sum_sq / float(samples);
-      float var = m2 - mean * mean;
+    if (params.noise_threshold > 0.f && samples >= params.min_adaptive_samples) {
+      float var = m2 / float(samples - 1);
       float stddev = sqrtf(fmaxf(var, 0.f));
-      if (stddev / fmaxf(mean, 1e-6f) < params.noise_threshold)
+      float noise = stddev / fmaxf(mean, 1e-6f);
+
+      float* nm = ptr_at<float>(params.noise_map);
+      atomicMaxf(&nm[dst], noise);
+      if (x > 0) atomicMaxf(&nm[dst - 1], noise);
+      if (x + 1 < W) atomicMaxf(&nm[dst + 1], noise);
+      if (y > 0) atomicMaxf(&nm[dst - W], noise);
+      if (y + 1 < H) atomicMaxf(&nm[dst + W], noise);
+      if (x > 0 && y > 0) atomicMaxf(&nm[dst - W - 1], noise);
+      if (x + 1 < W && y > 0) atomicMaxf(&nm[dst - W + 1], noise);
+      if (x > 0 && y + 1 < H) atomicMaxf(&nm[dst + W - 1], noise);
+      if (x + 1 < W && y + 1 < H) atomicMaxf(&nm[dst + W + 1], noise);
+
+      float max_noise = noise;
+      max_noise = fmaxf(max_noise, nm[dst]);
+      if (x > 0) max_noise = fmaxf(max_noise, nm[dst - 1]);
+      if (x + 1 < W) max_noise = fmaxf(max_noise, nm[dst + 1]);
+      if (y > 0) max_noise = fmaxf(max_noise, nm[dst - W]);
+      if (y + 1 < H) max_noise = fmaxf(max_noise, nm[dst + W]);
+      if (x > 0 && y > 0) max_noise = fmaxf(max_noise, nm[dst - W - 1]);
+      if (x + 1 < W && y > 0) max_noise = fmaxf(max_noise, nm[dst - W + 1]);
+      if (x > 0 && y + 1 < H) max_noise = fmaxf(max_noise, nm[dst + W - 1]);
+      if (x + 1 < W && y + 1 < H) max_noise = fmaxf(max_noise, nm[dst + W + 1]);
+
+      if (max_noise < params.noise_threshold)
         break;
     }
 
     seed = prd.seed;
   }
 
-  float rad = fmaxf(sum / float(samples), 0.f);
   float* out = ptr_at<float>(params.out_bayer);
-  out[dst] = rad;
+  out[dst] = fmaxf(mean, 0.f);
 }
