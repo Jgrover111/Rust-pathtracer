@@ -417,50 +417,126 @@ fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
 fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     demosaic_amaze(raw, w, h, pattern)
 }
-/// Multiply a 3×3 matrix by a 3-component vector.
-fn mul3(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
-    [
-        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-    ]
-}
-/// ACES filmic tone mapping curve.
-fn aces_film(x: f32) -> f32 {
-    let a = 2.51;
-    let b = 0.03;
-    let c = 2.43;
-    let d = 0.59;
-    let e = 0.14;
-    ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
-}
-/// Apply [`aces_film`] to each channel of `v`.
-fn tonemap_aces(v: [f32; 3]) -> [f32; 3] {
-    [aces_film(v[0]), aces_film(v[1]), aces_film(v[2])]
-}
-/// Standard sRGB OETF converting linear light to gamma-encoded value.
-fn oetf_srgb(x: f32) -> f32 {
-    if x <= 0.0031308 {
-        12.92 * x
-    } else {
-        1.055 * x.powf(1.0 / 2.4) - 0.055
-    }
+/// 3D color lookup table loaded from a `.cube` file.
+struct CubeLut {
+    size: usize,
+    table: Vec<[f32; 3]>,
 }
 
-const M_ACESCG_TO_SRGB: [[f32; 3]; 3] = [
-    [1.4514393, -0.23651075, -0.21492857],
-    [-0.07655377, 1.1762297, -0.09967593],
-    [0.00831615, -0.00603245, 0.99771631],
-];
-const M_ACESCG_TO_REC2020: [[f32; 3]; 3] = [
-    [1.705051, -0.621792, -0.083258],
-    [-0.130257, 1.140802, -0.010547],
-    [-0.024003, -0.128968, 1.152971],
-];
+impl CubeLut {
+    /// Load a LUT from a `.cube` file on disk.
+    fn from_file(path: &str) -> Result<Self, io::Error> {
+        let data = std::fs::read_to_string(path)?;
+        let mut size = 0usize;
+        let mut table = Vec::new();
+        for line in data.lines() {
+            let line = line.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.starts_with("TITLE")
+                || line.starts_with("DOMAIN_MIN")
+                || line.starts_with("DOMAIN_MAX")
+            {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("LUT_3D_SIZE") {
+                size = rest
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                table.reserve(size * size * size);
+                continue;
+            }
+            let cols: Vec<_> = line.split_whitespace().collect();
+            if cols.len() == 3 {
+                let r = cols[0]
+                    .parse::<f32>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let g = cols[1]
+                    .parse::<f32>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let b = cols[2]
+                    .parse::<f32>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                table.push([r, g, b]);
+            }
+        }
+        if size == 0 || table.len() != size * size * size {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid LUT"));
+        }
+        Ok(Self { size, table })
+    }
+
+    /// Sample the LUT using tetrahedral interpolation.
+    fn sample(&self, r: f32, g: f32, b: f32) -> [f32; 3] {
+        let n = self.size as i32;
+        let max = (n - 1) as f32;
+        let fr = r.clamp(0.0, 1.0) * max;
+        let fg = g.clamp(0.0, 1.0) * max;
+        let fb = b.clamp(0.0, 1.0) * max;
+        let r0 = fr.floor() as i32;
+        let g0 = fg.floor() as i32;
+        let b0 = fb.floor() as i32;
+        let dr = fr - r0 as f32;
+        let dg = fg - g0 as f32;
+        let db = fb - b0 as f32;
+        let r1 = (r0 + 1).min(n - 1);
+        let g1 = (g0 + 1).min(n - 1);
+        let b1 = (b0 + 1).min(n - 1);
+        let idx = |ri: i32, gi: i32, bi: i32| -> usize {
+            ((ri as usize) * self.size + gi as usize) * self.size + bi as usize
+        };
+        let c000 = self.table[idx(r0, g0, b0)];
+        let c100 = self.table[idx(r1, g0, b0)];
+        let c010 = self.table[idx(r0, g1, b0)];
+        let c001 = self.table[idx(r0, g0, b1)];
+        let c110 = self.table[idx(r1, g1, b0)];
+        let c101 = self.table[idx(r1, g0, b1)];
+        let c011 = self.table[idx(r0, g1, b1)];
+        let c111 = self.table[idx(r1, g1, b1)];
+        let mut out = [0.0; 3];
+        for i in 0..3 {
+            out[i] = if dr >= dg {
+                if dg >= db {
+                    c000[i]
+                        + dr * (c100[i] - c000[i])
+                        + dg * (c110[i] - c100[i])
+                        + db * (c111[i] - c110[i])
+                } else if dr >= db {
+                    c000[i]
+                        + dr * (c100[i] - c000[i])
+                        + db * (c101[i] - c100[i])
+                        + dg * (c111[i] - c101[i])
+                } else {
+                    c000[i]
+                        + db * (c001[i] - c000[i])
+                        + dr * (c101[i] - c001[i])
+                        + dg * (c111[i] - c101[i])
+                }
+            } else if dr >= db {
+                c000[i]
+                    + dg * (c010[i] - c000[i])
+                    + dr * (c110[i] - c010[i])
+                    + db * (c111[i] - c110[i])
+            } else if dg >= db {
+                c000[i]
+                    + dg * (c010[i] - c000[i])
+                    + db * (c011[i] - c010[i])
+                    + dr * (c111[i] - c011[i])
+            } else {
+                c000[i]
+                    + db * (c001[i] - c000[i])
+                    + dg * (c011[i] - c001[i])
+                    + dr * (c111[i] - c011[i])
+            };
+        }
+        out
+    }
+}
 /// Save an ACEScg image to an 8-bit sRGB PNG file.
 ///
 /// `img_aces` must have `w * h * 3` elements. `exposure` scales the pixel values before
-/// tonemapping.
+/// the LUT is applied.
 fn save_png_srgb_from_acescg(
     path: &str,
     w: i32,
@@ -468,23 +544,19 @@ fn save_png_srgb_from_acescg(
     img_aces: &[f32],
     exposure: f32,
 ) -> Result<(), io::Error> {
+    let lut = CubeLut::from_file("luts/ACEScg_Linear_to_Rec709_sRGB_65pt.cube")?;
     let mut buf = vec![0u8; (w * h * 3) as usize];
     for y in 0..h {
         for x in 0..w {
             let i = idx(x, y, w) * 3;
-            let a = [
+            let rgb = lut.sample(
                 img_aces[i + 0] * exposure,
                 img_aces[i + 1] * exposure,
                 img_aces[i + 2] * exposure,
-            ];
-            let t = tonemap_aces(a);
-            let srgb_lin = mul3(M_ACESCG_TO_SRGB, t);
-            let r = oetf_srgb(srgb_lin[0].clamp(0.0, 1.0));
-            let g = oetf_srgb(srgb_lin[1].clamp(0.0, 1.0));
-            let b = oetf_srgb(srgb_lin[2].clamp(0.0, 1.0));
-            buf[i + 0] = (r * 255.0 + 0.5) as u8;
-            buf[i + 1] = (g * 255.0 + 0.5) as u8;
-            buf[i + 2] = (b * 255.0 + 0.5) as u8;
+            );
+            buf[i + 0] = (rgb[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            buf[i + 1] = (rgb[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            buf[i + 2] = (rgb[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         }
     }
     let file = File::create(path)?;
@@ -496,22 +568,10 @@ fn save_png_srgb_from_acescg(
     writer.write_image_data(&buf)?;
     Ok(())
 }
-/// Convert absolute luminance in nits to a PQ-encoded value.
-fn pq_oetf_from_nits(nits: f32) -> f32 {
-    let m1 = 2610.0 / 16384.0;
-    let m2 = 2523.0 / 32.0;
-    let c1 = 3424.0 / 4096.0;
-    let c2 = 2413.0 / 128.0;
-    let c3 = 2392.0 / 128.0;
-    let l = (nits / 10000.0).max(0.0);
-    let l_m1 = l.powf(m1);
-    ((c1 + c2 * l_m1) / (1.0 + c3 * l_m1))
-        .powf(m2)
-        .clamp(0.0, 1.0)
-}
 /// Save an ACEScg image as a 10-bit Rec.2100 PQ AVIF file.
 ///
-/// `img_aces` must contain `w * h * 3` values. `exposure` scales values before tonemapping.
+/// `img_aces` must contain `w * h * 3` values. `exposure` scales values before the LUT
+/// is applied.
 fn save_avif_rec2100_pq_from_acescg(
     path: &str,
     w: i32,
@@ -521,23 +581,18 @@ fn save_avif_rec2100_pq_from_acescg(
 ) -> Result<(), io::Error> {
     let n = (w * h) as usize;
     let mut rgb10: Vec<rgb::RGB<u16>> = Vec::with_capacity(n);
+    let lut = CubeLut::from_file("luts/ACEScg_Linear_to_Rec2100_PQ_65pt.cube")?;
     for y in 0..h {
         for x in 0..w {
             let i = idx(x, y, w) * 3;
-            let a = [
+            let rgb = lut.sample(
                 img_aces[i] * exposure,
                 img_aces[i + 1] * exposure,
                 img_aces[i + 2] * exposure,
-            ];
-            let t = tonemap_aces(a);
-            let rec2020 = mul3(M_ACESCG_TO_REC2020, t);
-            // ACES tonemapping is defined for a 100 nit reference display.
-            let r = pq_oetf_from_nits(rec2020[0].max(0.0) * 200.0);
-            let g = pq_oetf_from_nits(rec2020[1].max(0.0) * 200.0);
-            let b = pq_oetf_from_nits(rec2020[2].max(0.0) * 200.0);
-            let r10 = (r * 1023.0 + 0.5) as u16;
-            let g10 = (g * 1023.0 + 0.5) as u16;
-            let b10 = (b * 1023.0 + 0.5) as u16;
+            );
+            let r10 = (rgb[0].clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
+            let g10 = (rgb[1].clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
+            let b10 = (rgb[2].clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
             rgb10.push(rgb::RGB {
                 r: r10,
                 g: g10,
@@ -594,10 +649,10 @@ fn save_avif_rec2100_pq_from_acescg(
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 1024;
-    let max_depth = 32;
+    let spp = 50000;
+    let max_depth = 64;
     let pattern = 0;
-    let noise_threshold = 0.01_f32; // 0 disables adaptive sampling
+    let noise_threshold = 0.00390625_f32; // 0 disables adaptive sampling
     let min_adaptive_samples = 32;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
