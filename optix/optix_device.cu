@@ -10,6 +10,11 @@
 #define GUIDE_THETA_RES 8
 #define GUIDE_BIN_COUNT (GUIDE_PHI_RES * GUIDE_THETA_RES)
 
+// Precomputed constants to avoid repeated division at runtime
+#define INV_UINT16       (1.0f / 65536.0f)
+#define INV_PLASTIC      (1.0f / 1.32471795724474602596f)
+#define INV_PLASTIC_SQR  (1.0f / (1.32471795724474602596f * 1.32471795724474602596f))
+
 // Keep this in sync with optix_wrapper.cpp
 struct Params
 {
@@ -130,7 +135,8 @@ static __forceinline__ __device__ float  clamp01(float x) {
 }
 
 static __forceinline__ __device__ float select(const float3& v, int ch) {
-  return ch==0 ? v.x : (ch==1 ? v.y : v.z);
+  // Branchless channel selection via pointer arithmetic
+  return (&v.x)[ch];
 }
 static __forceinline__ __device__ unsigned int pcg(unsigned long long& state) {
   unsigned long long oldstate = state;
@@ -162,13 +168,12 @@ static __forceinline__ __device__ unsigned int hash_u32(unsigned int x)
 
 static __forceinline__ __device__ float2 blue_noise(int x, int y, int s, int frame)
 {
-  const float a1 = 1.0f / 1.32471795724474602596f;      // plastic constant
-  const float a2 = 1.0f / (1.32471795724474602596f * 1.32471795724474602596f);
   unsigned int h = hash_u32(x * 1973u + y * 9277u + frame * 26699u);
-  float rx = (h & 0xffff) * (1.0f / 65536.0f);
-  float ry = ((h >> 16) & 0xffff) * (1.0f / 65536.0f);
-  float u = fmodf(rx + (s + 0.5f) * a1, 1.0f);
-  float v = fmodf(ry + (s + 0.5f) * a2, 1.0f);
+  float rx = (h & 0xffff) * INV_UINT16;
+  float ry = ((h >> 16) & 0xffff) * INV_UINT16;
+  float fs = s + 0.5f;
+  float u = fmodf(rx + fs * INV_PLASTIC, 1.0f);
+  float v = fmodf(ry + fs * INV_PLASTIC_SQR, 1.0f);
   return make_float2(u, v);
 }
 
