@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=optix/CMakeLists.txt");
     println!("cargo:rerun-if-changed=optix/optix_wrapper.cpp");
     println!("cargo:rerun-if-changed=optix/optix_device.cu");
+    println!("cargo:rerun-if-changed=optix/cuda_kernels.cu");
 
     let mut cfg = cmake::Config::new("optix");
 

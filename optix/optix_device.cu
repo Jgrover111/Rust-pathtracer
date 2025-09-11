@@ -21,9 +21,13 @@ struct Params
   CUdeviceptr              out_rgb;      // float3*
   CUdeviceptr              out_bayer;    // float*
   CUdeviceptr              noise_map;    // float*
+  CUdeviceptr              flags;       // uint32_t*
+  CUdeviceptr              active_pixels; // uint32_t*
+  CUdeviceptr              sample_counts; // int*
   int                      width;
   int                      height;
-  int                      spp;
+  int                      spp;         // samples per launch
+  int                      max_spp;     // total samples per pixel limit
   int                      max_depth;
   int                      frame;
   int                      bayer_pattern; // 0:RGGB,1:BGGR,2:GRBG,3:GBRG
@@ -926,9 +930,10 @@ extern "C" __global__ void __closesthit__ch_bayer()
 
 static __forceinline__ __device__ float3 sample_camera_dir(int x, int y, const float2& jitter)
 {
-  const uint3 dim = optixGetLaunchDimensions();
-  float fx = (float(x) + 0.5f + jitter.x) / float(dim.x);
-  float fy = (float(y) + 0.5f + jitter.y) / float(dim.y);
+  // Use the image dimensions from params rather than the launch dimensions so
+  // that ray generation works with 1D launches over compacted pixel lists.
+  float fx = (float(x) + 0.5f + jitter.x) / float(params.width);
+  float fy = (float(y) + 0.5f + jitter.y) / float(params.height);
   fx = clamp01(fx);
   fy = clamp01(fy);
   const float2 d = make_float2(2.0f * fx - 1.0f, 1.0f - 2.0f * fy);
@@ -950,33 +955,43 @@ static __forceinline__ __device__ int bayer_channel_for(int x, int y, int patter
 extern "C" __global__ void __raygen__rg()
 {
   const uint3  idx = optixGetLaunchIndex();
-  const int    x   = int(idx.x);
-  const int    y   = int(idx.y);
+  const int    launch = int(idx.x);
   const int    W   = params.width;
   const int    H   = params.height;
-  const int    dst = y * W + x;
+  int dst = launch;
+  if (params.active_pixels)
+    dst = ptr_at<uint32_t>(params.active_pixels)[launch];
+  const int    x   = dst % W;
+  const int    y   = dst / W;
 
   // Trace radiance
   const float3 org = params.cam_eye;
   // Track running means and variances using Welford's algorithm.
   // We maintain RGB statistics even if only a Bayer image is requested so that
   // adaptive sampling decisions take all colour channels into account.
-  float3 mean_rgb = make3(0.0f);
-  float3 m2_rgb = make3(0.0f);
-  float mean_bayer = 0.0f;
-  float m2_bayer = 0.0f;
   // Track RGB variance even if we are not writing an RGB image to ensure
   // adaptive sampling decisions consider all colour channels.
   const bool write_rgb   = params.out_rgb   != 0;
   const bool write_bayer = params.out_bayer != 0;
+
+  float3 mean_rgb = make3(0.0f);
+  if (write_rgb)
+    mean_rgb = ptr_at<float3>(params.out_rgb)[dst];
+  float3 m2_rgb = make3(0.0f);
+  float mean_bayer = 0.0f;
+  if (write_bayer)
+    mean_bayer = ptr_at<float>(params.out_bayer)[dst];
+  float m2_bayer = 0.0f;
   const int ch = bayer_channel_for(x, y, params.bayer_pattern);
   unsigned long long seed =
       ((unsigned long long)params.frame * 9781ULL) ^
       ((unsigned long long)dst * 6271ULL) ^
       0x853c49e6748fea9bULL;
 
-  int samples = 0;
-  for (int s = 0; s < params.spp; ++s) {
+  int* sc = ptr_at<int>(params.sample_counts);
+  int samples = sc[dst];
+  float max_noise = params.noise_threshold;
+  for (int s = 0; s < params.spp && samples < params.max_spp; ++s) {
     samples++;
     PRD prd;
     prd.radiance = make3(0.0f);
@@ -1061,8 +1076,7 @@ extern "C" __global__ void __raygen__rg()
       if (x > 0 && y + 1 < H) atomicMaxf(&nm[dst + W - 1], noise);
       if (x + 1 < W && y + 1 < H) atomicMaxf(&nm[dst + W + 1], noise);
 
-      float max_noise = noise;
-      max_noise = fmaxf(max_noise, nm[dst]);
+      max_noise = fmaxf(noise, nm[dst]);
       if (x > 0) max_noise = fmaxf(max_noise, nm[dst - 1]);
       if (x + 1 < W) max_noise = fmaxf(max_noise, nm[dst + 1]);
       if (y > 0) max_noise = fmaxf(max_noise, nm[dst - W]);
@@ -1078,6 +1092,13 @@ extern "C" __global__ void __raygen__rg()
 
     seed = prd.seed;
   }
+  sc[dst] = samples;
+
+  unsigned int* fl = ptr_at<unsigned int>(params.flags);
+  unsigned int active = (samples < params.max_spp) ? 1u : 0u;
+  if (params.noise_threshold > 0.f && samples >= params.min_adaptive_samples)
+    active = (max_noise >= params.noise_threshold) && (samples < params.max_spp);
+  fl[dst] = active;
 
   // Write outputs
   if (write_rgb) {
@@ -1093,14 +1114,19 @@ extern "C" __global__ void __raygen__rg()
 extern "C" __global__ void __raygen__bayer()
 {
   const uint3  idx = optixGetLaunchIndex();
-  const int    x   = int(idx.x);
-  const int    y   = int(idx.y);
+  const int    launch = int(idx.x);
   const int    W   = params.width;
   const int    H   = params.height;
-  const int    dst = y * W + x;
+  int dst = launch;
+  if (params.active_pixels)
+    dst = ptr_at<uint32_t>(params.active_pixels)[launch];
+  const int    x   = dst % W;
+  const int    y   = dst / W;
 
   const float3 org = params.cam_eye;
   float mean = 0.0f;
+  if (params.out_bayer)
+    mean = ptr_at<float>(params.out_bayer)[dst];
   float m2 = 0.0f;
   const int ch = bayer_channel_for(x, y, params.bayer_pattern);
   unsigned long long seed =
@@ -1108,8 +1134,10 @@ extern "C" __global__ void __raygen__bayer()
       ((unsigned long long)dst * 6271ULL) ^
       0x37c4d1e74c3fa19bULL;
 
-  int samples = 0;
-  for (int s = 0; s < params.spp; ++s) {
+  int* sc = ptr_at<int>(params.sample_counts);
+  int samples = sc[dst];
+  float max_noise = params.noise_threshold;
+  for (int s = 0; s < params.spp && samples < params.max_spp; ++s) {
     samples++;
     PRDScalar prd;
     prd.radiance = 0.0f;
@@ -1168,8 +1196,7 @@ extern "C" __global__ void __raygen__bayer()
       if (x > 0 && y + 1 < H) atomicMaxf(&nm[dst + W - 1], noise);
       if (x + 1 < W && y + 1 < H) atomicMaxf(&nm[dst + W + 1], noise);
 
-      float max_noise = noise;
-      max_noise = fmaxf(max_noise, nm[dst]);
+      max_noise = fmaxf(noise, nm[dst]);
       if (x > 0) max_noise = fmaxf(max_noise, nm[dst - 1]);
       if (x + 1 < W) max_noise = fmaxf(max_noise, nm[dst + 1]);
       if (y > 0) max_noise = fmaxf(max_noise, nm[dst - W]);
@@ -1185,7 +1212,14 @@ extern "C" __global__ void __raygen__bayer()
 
     seed = prd.seed;
   }
+  sc[dst] = samples;
+  unsigned int* fl = ptr_at<unsigned int>(params.flags);
+  unsigned int active = (samples < params.max_spp) ? 1u : 0u;
+  if (params.noise_threshold > 0.f && samples >= params.min_adaptive_samples)
+    active = (max_noise >= params.noise_threshold) && (samples < params.max_spp);
+  fl[dst] = active;
 
   float* out = ptr_at<float>(params.out_bayer);
   out[dst] = fmaxf(mean, 0.f);
 }
+

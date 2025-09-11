@@ -36,6 +36,9 @@ message(STATUS "Using OptiX SDK at: ${OPTIX_ROOT}")
 # ---- Build PTX from optix_device.cu ----
 set(PTX ${CMAKE_CURRENT_BINARY_DIR}/optix_device.ptx)
 
+# Additional PTX for auxiliary CUDA kernels.
+set(CUDA_PTX ${CMAKE_CURRENT_BINARY_DIR}/cuda_kernels.ptx)
+
 add_custom_command(
         OUTPUT ${PTX}
         COMMAND ${CMAKE_CUDA_COMPILER}
@@ -57,6 +60,24 @@ add_custom_command(
 )
 add_custom_target(optix_ptx DEPENDS ${PTX})
 
+add_custom_command(
+        OUTPUT ${CUDA_PTX}
+        COMMAND ${CMAKE_CUDA_COMPILER}
+        --use-local-env
+        -I "${CUDAToolkit_INCLUDE_DIRS}"
+        -x cu --compile
+        --generate-code=arch=compute_75,code=[compute_75,sm_75]
+        --use_fast_math
+        -std=c++17
+        -ptx
+        "${CMAKE_CURRENT_SOURCE_DIR}/cuda_kernels.cu"
+        -o "${CUDA_PTX}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cuda_kernels.cu"
+        COMMENT "NVCC PTX: cuda_kernels.cu -> cuda_kernels.ptx"
+        VERBATIM
+)
+add_custom_target(cuda_ptx DEPENDS ${CUDA_PTX})
+
 # ---- OptiX stubs ----
 # --- Generate and build optix_stubs (SDK provides only the header) ---
 set(OPTIX_STUBS_CPP "${CMAKE_CURRENT_BINARY_DIR}/optix_stubs.cpp")
@@ -69,7 +90,7 @@ target_include_directories(optix_stubs PUBLIC "${OPTIX_ROOT}/include")
 add_library(optix_wrapper SHARED
         optix_wrapper.cpp
 )
-add_dependencies(optix_wrapper optix_ptx)
+add_dependencies(optix_wrapper optix_ptx cuda_ptx)
 
 target_include_directories(optix_wrapper
         PRIVATE
@@ -85,9 +106,10 @@ target_compile_definitions(optix_wrapper PRIVATE
         OPTIX_STACK_SIZE_SCALE=${OPTIX_STACK_SIZE_SCALE}
 )
 
-# Pass the PTX file as a *string literal* macro usable as: const char* p = OPTIX_PTX_PATH;
+# Pass the PTX files as *string literal* macros usable at runtime.
 string(REPLACE "\\" "/" PTX_SLASHED "${PTX}")
-target_compile_definitions(optix_wrapper PRIVATE OPTIX_PTX_PATH=\"${PTX_SLASHED}\")
+string(REPLACE "\\" "/" CUDA_PTX_SLASHED "${CUDA_PTX}")
+target_compile_definitions(optix_wrapper PRIVATE OPTIX_PTX_PATH=\"${PTX_SLASHED}\" CUDA_PTX_PATH=\"${CUDA_PTX_SLASHED}\")
 
 set_target_properties(optix_wrapper PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON

@@ -29,6 +29,9 @@
 #ifndef OPTIX_PTX_PATH
 #  error "OPTIX_PTX_PATH not defined (set by CMake)."
 #endif
+#ifndef CUDA_PTX_PATH
+#  error "CUDA_PTX_PATH not defined (set by CMake)."
+#endif
 
 // Build-time tunables (defaults can be overridden via CMake options).
 #ifndef OPTIX_MAX_REG_COUNT
@@ -69,8 +72,10 @@
 static std::vector<char> readFile(const char* path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) { fprintf(stderr, "Failed to open PTX: %s\n", path); std::abort(); }
-    return std::vector<char>((std::istreambuf_iterator<char>(f)),
-                              std::istreambuf_iterator<char>());
+    auto data = std::vector<char>((std::istreambuf_iterator<char>(f)),
+                                  std::istreambuf_iterator<char>());
+    data.push_back('\0');
+    return data;
 }
 
 static OptixResult createModuleCompat(OptixDeviceContext ctx,
@@ -167,9 +172,13 @@ struct Params
   CUdeviceptr out_rgb;        // float3*
   CUdeviceptr out_bayer;      // float*
   CUdeviceptr noise_map;      // float*
+  CUdeviceptr flags;          // uint32_t*
+  CUdeviceptr active_pixels;  // uint32_t*
+  CUdeviceptr sample_counts;  // int*
   int         width;
   int         height;
-  int         spp;
+  int         spp;            // samples per launch
+  int         max_spp;        // total samples per pixel limit
   int         max_depth;
   int         frame;
   int         bayer_pattern;  // 0..3
@@ -278,9 +287,19 @@ struct State
   CUdeviceptr           d_out_rgb   = 0; // float3*
   CUdeviceptr           d_out_bayer = 0; // float*
   CUdeviceptr           d_noise_map = 0; // float*
+  CUdeviceptr           d_flags = 0; // uint32_t*
+  CUdeviceptr           d_active_in = 0; // uint32_t*
+  CUdeviceptr           d_active_out = 0; // uint32_t*
+  CUdeviceptr           d_active_count = 0; // uint32_t*
+  CUdeviceptr           d_sample_counts = 0; // int*
   uint32_t              width=0, height=0;
   CUstream              stream = nullptr;
   CUstream              copy_stream = nullptr;
+
+  // kernels
+  CUmodule              cu_module = nullptr;
+  CUfunction            fn_compact = nullptr;
+  CUfunction            fn_clear_noise = nullptr;
 
   // options
   int                   bayer_pattern = 0;
@@ -291,6 +310,11 @@ struct State
     if (d_out_rgb)   cuMemFree(d_out_rgb);
     if (d_out_bayer) cuMemFree(d_out_bayer);
     if (d_noise_map) cuMemFree(d_noise_map);
+    if (d_flags)     cuMemFree(d_flags);
+    if (d_active_in) cuMemFree(d_active_in);
+    if (d_active_out) cuMemFree(d_active_out);
+    if (d_active_count) cuMemFree(d_active_count);
+    if (d_sample_counts) cuMemFree(d_sample_counts);
     if (d_params)    cuMemFree(d_params);
     if (d_guiding)   cuMemFree(d_guiding);
     if (copy_stream) cuStreamDestroy(copy_stream);
@@ -322,6 +346,7 @@ struct State
     if (pg_hit_rad_bayer) optixProgramGroupDestroy(pg_hit_rad_bayer);
     if (pg_hit_sh)        optixProgramGroupDestroy(pg_hit_sh);
     if (module)      optixModuleDestroy(module);
+    if (cu_module)   cuModuleUnload(cu_module);
     if (ctx)         optixDeviceContextDestroy(ctx);
     if (cuCtx) {
       CUdevice dev = 0;
@@ -549,6 +574,11 @@ static void createPipeline(State& s)
   OTK_CHECK(createModuleCompat(s.ctx, &mopts, &popts,
                                ptxBytes.data(), ptxBytes.size(),
                                log, &logSize, &s.module));
+
+  auto cudaPtx = readFile(CUDA_PTX_PATH);
+  CU_CHECK(cuModuleLoadData(&s.cu_module, cudaPtx.data()));
+  CU_CHECK(cuModuleGetFunction(&s.fn_compact, s.cu_module, "compact_active"));
+  CU_CHECK(cuModuleGetFunction(&s.fn_clear_noise, s.cu_module, "clear_noise"));
 
   OptixProgramGroupOptions pg_opts {};
 
@@ -812,13 +842,23 @@ static State* make_state(uint32_t W, uint32_t H)
   size_t rgbBytes    = size_t(W) * size_t(H) * sizeof(float3);
   size_t bayerBytes  = size_t(W) * size_t(H) * sizeof(float);
   size_t noiseBytes  = size_t(W) * size_t(H) * sizeof(float);
+  size_t flagBytes   = size_t(W) * size_t(H) * sizeof(uint32_t);
+  size_t idxBytes    = size_t(W) * size_t(H) * sizeof(uint32_t);
+  size_t sampleBytes = size_t(W) * size_t(H) * sizeof(int);
   size_t guideBytes  = size_t(GUIDE_BIN_COUNT) * sizeof(float);
 
   CU_CHECK(cuMemAlloc(&st->d_out_rgb,   rgbBytes));
   CU_CHECK(cuMemAlloc(&st->d_out_bayer, bayerBytes));
   CU_CHECK(cuMemAlloc(&st->d_noise_map, noiseBytes));
+  CU_CHECK(cuMemAlloc(&st->d_flags, flagBytes));
+  CU_CHECK(cuMemAlloc(&st->d_active_in, idxBytes));
+  CU_CHECK(cuMemAlloc(&st->d_active_out, idxBytes));
+  CU_CHECK(cuMemAlloc(&st->d_active_count, sizeof(uint32_t)));
+  CU_CHECK(cuMemAlloc(&st->d_sample_counts, sampleBytes));
   CU_CHECK(cuMemAlloc(&st->d_guiding, guideBytes));
   CU_CHECK(cuMemsetD8(st->d_noise_map, 0, noiseBytes));
+  CU_CHECK(cuMemsetD8(st->d_flags, 0, flagBytes));
+  CU_CHECK(cuMemsetD8(st->d_sample_counts, 0, sampleBytes));
   CU_CHECK(cuMemsetD8(st->d_guiding, 0, guideBytes));
   CU_CHECK(cuStreamCreate(&st->stream, CU_STREAM_NON_BLOCKING));
   CU_CHECK(cuStreamCreate(&st->copy_stream, CU_STREAM_NON_BLOCKING));
@@ -826,9 +866,13 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.out_rgb   = st->d_out_rgb;
   st->h_params.out_bayer = st->d_out_bayer;
   st->h_params.noise_map = st->d_noise_map;
+  st->h_params.flags     = st->d_flags;
+  st->h_params.active_pixels = st->d_active_in;
+  st->h_params.sample_counts = st->d_sample_counts;
   st->h_params.width     = W;
   st->h_params.height    = H;
   st->h_params.spp     = 1;
+  st->h_params.max_spp = 1;
   st->h_params.max_depth = 5;
   st->h_params.frame     = 0;
   st->h_params.bayer_pattern = 0;
@@ -903,48 +947,51 @@ void  optix_ctx_set_camera(void* handle,
 static int optix_ctx_render_rgb(void* handle, int spp, int max_depth, float noise_threshold, int min_adaptive_samples, float* out_rgb)
 {
     if (!out_rgb) return -1;
-    // same pattern you use elsewhere: update Params on device, launch, copy back
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
-    s.h_params.spp = spp;
     s.h_params.max_depth = max_depth;
     s.h_params.noise_threshold = noise_threshold;
     s.h_params.min_adaptive_samples = min_adaptive_samples;
-    // If your renderer needs any per-frame fields set, do it here.
-    // e.g., s.h_params.bayer_pattern = s.bayer_pattern;   // (RGB path usually not needed)
+    s.h_params.max_spp = spp;
+    const int batch = 4;
+    s.h_params.spp = batch;
 
-    CU_CHECK( cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream) );
     size_t px = size_t(s.width) * size_t(s.height);
-    CU_CHECK( cuMemsetD32Async(s.d_noise_map, 0, px, s.stream) );
+    CU_CHECK(cuMemsetD32Async(s.d_sample_counts, 0, px, s.stream));
+    CU_CHECK(cuMemsetD32Async(s.d_flags, 0, px, s.stream));
+    CU_CHECK(cuMemsetD8Async(s.d_out_rgb, 0, px * sizeof(float3), s.stream));
+    CU_CHECK(cuMemsetD8Async(s.d_out_bayer, 0, px * sizeof(float), s.stream));
 
-    CUevent done = nullptr;
-    CUevent copy_done = nullptr;
-    CU_CHECK(cuEventCreate(&done, CU_EVENT_DEFAULT));
-    CU_CHECK(cuEventCreate(&copy_done, CU_EVENT_DEFAULT));
+    std::vector<uint32_t> init(px);
+    for (uint32_t i = 0; i < px; ++i) init[i] = i;
+    CU_CHECK(cuMemcpyHtoDAsync(s.d_active_in, init.data(), px * sizeof(uint32_t), s.stream));
 
-    OTK_CHECK( optixLaunch(
-        s.pipeline,
-        /*stream*/ s.stream,
-        /*params*/ s.d_params,
-        /*paramsSize*/ sizeof(Params),
-        /*SBT*/ &s.sbt_rgb,
-        /*w,h,d*/ s.width, s.height, 1) );
+    uint32_t active = static_cast<uint32_t>(px);
+    while (active > 0) {
+        unsigned int block = 128;
+        unsigned int grid = (active + block - 1) / block;
+        void* clearArgs[] = { &s.d_noise_map, &s.d_active_in, &active };
+        CU_CHECK(cuLaunchKernel(s.fn_clear_noise, grid,1,1, block,1,1, 0, s.stream, clearArgs, nullptr));
 
-    CU_CHECK(cuEventRecord(done, s.stream));
-    CU_CHECK(cuStreamWaitEvent(s.copy_stream, done, 0));
+        s.h_params.active_pixels = s.d_active_in;
+        CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
 
-    // interleaved RGB float32
-    const size_t bytes = size_t(s.width) * size_t(s.height) * 3 * sizeof(float);
-    // out_rgb must point to page-locked memory (allocated via optix_alloc_host)
-    CU_CHECK( cuMemcpyDtoHAsync(out_rgb, s.d_out_rgb, bytes, s.copy_stream) );
+        OTK_CHECK(optixLaunch(s.pipeline, s.stream, s.d_params, sizeof(Params), &s.sbt_rgb, active, 1, 1));
 
-    CU_CHECK(cuEventRecord(copy_done, s.copy_stream));
-    CU_CHECK(cuStreamWaitEvent(s.stream, copy_done, 0));
+        CU_CHECK(cuMemsetD32Async(s.d_active_count, 0, 1, s.stream));
+        void* compArgs[] = { &s.d_active_in, &s.d_flags, &s.d_active_out, &s.d_active_count, &active };
+        grid = (active + block - 1) / block;
+        CU_CHECK(cuLaunchKernel(s.fn_compact, grid,1,1, block,1,1, 0, s.stream, compArgs, nullptr));
 
-    CU_CHECK(cuEventDestroy(copy_done));
-    CU_CHECK(cuEventDestroy(done));
+        CU_CHECK(cuMemcpyDtoHAsync(&active, s.d_active_count, sizeof(uint32_t), s.stream));
+        CU_CHECK(cuStreamSynchronize(s.stream));
+        std::swap(s.d_active_in, s.d_active_out);
+    }
 
+    CU_CHECK(cuStreamSynchronize(s.stream));
+    const size_t bytes = px * 3 * sizeof(float);
+    CU_CHECK(cuMemcpyDtoH(out_rgb, s.d_out_rgb, bytes));
     return 0;
 }
 
@@ -954,46 +1001,50 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, floa
     auto& s = *reinterpret_cast<State*>(handle);
 
     s.h_params.frame++;
-    s.h_params.spp = spp;
     s.h_params.max_depth = max_depth;
     s.h_params.noise_threshold = noise_threshold;
     s.h_params.min_adaptive_samples = min_adaptive_samples;
-    s.h_params.bayer_pattern = s.bayer_pattern;  // keep whatever you already store in s.bayer_pattern
-    CU_CHECK( cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream) );
-    // Disable RGB output for this launch by zeroing the device-side pointer.
-    CU_CHECK( cuMemsetD8Async(s.d_params + offsetof(Params, out_rgb), 0, sizeof(CUdeviceptr), s.stream) );
+    s.h_params.max_spp = spp;
+    s.h_params.bayer_pattern = s.bayer_pattern;
+
+    const int batch = 4;
+    s.h_params.spp = batch;
+
     size_t px = size_t(s.width) * size_t(s.height);
-    CU_CHECK( cuMemsetD32Async(s.d_noise_map, 0, px, s.stream) );
+    CU_CHECK(cuMemsetD32Async(s.d_sample_counts, 0, px, s.stream));
+    CU_CHECK(cuMemsetD32Async(s.d_flags, 0, px, s.stream));
+    CU_CHECK(cuMemsetD8Async(s.d_out_rgb, 0, px * sizeof(float3), s.stream));
+    CU_CHECK(cuMemsetD8Async(s.d_out_bayer, 0, px * sizeof(float), s.stream));
 
-    CUevent done = nullptr;
-    CUevent copy_done = nullptr;
-    CU_CHECK(cuEventCreate(&done, CU_EVENT_DEFAULT));
-    CU_CHECK(cuEventCreate(&copy_done, CU_EVENT_DEFAULT));
+    std::vector<uint32_t> init(px);
+    for (uint32_t i = 0; i < px; ++i) init[i] = i;
+    CU_CHECK(cuMemcpyHtoDAsync(s.d_active_in, init.data(), px * sizeof(uint32_t), s.stream));
 
-    // Use the RGB SBT so that the raygen program can still compute RGB
-    // variance for adaptive sampling, even when only a Bayer image is
-    // requested.
-    OTK_CHECK( optixLaunch(
-        s.pipeline,
-        /*stream*/ s.stream,
-        /*params*/ s.d_params,
-        /*paramsSize*/ sizeof(Params),
-        /*SBT*/ &s.sbt_rgb,
-        /*w,h,d*/ s.width, s.height, 1) );
+    uint32_t active = static_cast<uint32_t>(px);
+    while (active > 0) {
+        unsigned int block = 128;
+        unsigned int grid = (active + block - 1) / block;
+        void* clearArgs[] = { &s.d_noise_map, &s.d_active_in, &active };
+        CU_CHECK(cuLaunchKernel(s.fn_clear_noise, grid,1,1, block,1,1, 0, s.stream, clearArgs, nullptr));
 
-    CU_CHECK(cuEventRecord(done, s.stream));
-    CU_CHECK(cuStreamWaitEvent(s.copy_stream, done, 0));
+        s.h_params.active_pixels = s.d_active_in;
+        CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
 
-    const size_t bytes = size_t(s.width) * size_t(s.height) * sizeof(float);
-    // As above, perform an async copy to the page-locked host buffer.
-    CU_CHECK( cuMemcpyDtoHAsync(out_raw, s.d_out_bayer, bytes, s.copy_stream) );
+        OTK_CHECK(optixLaunch(s.pipeline, s.stream, s.d_params, sizeof(Params), &s.sbt_bayer, active, 1, 1));
 
-    CU_CHECK(cuEventRecord(copy_done, s.copy_stream));
-    CU_CHECK(cuStreamWaitEvent(s.stream, copy_done, 0));
+        CU_CHECK(cuMemsetD32Async(s.d_active_count, 0, 1, s.stream));
+        void* compArgs[] = { &s.d_active_in, &s.d_flags, &s.d_active_out, &s.d_active_count, &active };
+        grid = (active + block - 1) / block;
+        CU_CHECK(cuLaunchKernel(s.fn_compact, grid,1,1, block,1,1, 0, s.stream, compArgs, nullptr));
 
-    CU_CHECK(cuEventDestroy(copy_done));
-    CU_CHECK(cuEventDestroy(done));
+        CU_CHECK(cuMemcpyDtoHAsync(&active, s.d_active_count, sizeof(uint32_t), s.stream));
+        CU_CHECK(cuStreamSynchronize(s.stream));
+        std::swap(s.d_active_in, s.d_active_out);
+    }
 
+    CU_CHECK(cuStreamSynchronize(s.stream));
+    const size_t bytes = px * sizeof(float);
+    CU_CHECK(cuMemcpyDtoH(out_raw, s.d_out_bayer, bytes));
     return 0;
 }
 
