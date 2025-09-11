@@ -993,6 +993,8 @@ extern "C" __global__ void __raygen__rg()
     prd.py = y;
     prd.sample = s;
     prd.rng_dim = 0;
+    float3 sample_rgb = make3(0.0f);
+    float sample_bayer = 0.0f;
 
     while (!prd.done) {
       prd.radiance = make3(0.0f);
@@ -1010,21 +1012,26 @@ extern "C" __global__ void __raygen__rg()
         u0, u1);
       // Always accumulate RGB contributions for variance estimation
       float3 contrib_rgb = prd.radiance * prd.throughput;
-      float3 delta_rgb = contrib_rgb - mean_rgb;
-      mean_rgb += delta_rgb / float(samples);
-      float3 delta2_rgb = contrib_rgb - mean_rgb;
-      m2_rgb += delta_rgb * delta2_rgb;
+      sample_rgb += contrib_rgb;
       if (write_bayer) {
         float throughput_ch =
             (ch == 0 ? prd.throughput.x : (ch == 1 ? prd.throughput.y : prd.throughput.z));
         float contrib =
             (ch == 0 ? prd.radiance.x : (ch == 1 ? prd.radiance.y : prd.radiance.z)) *
             throughput_ch;
-        float delta_bayer = contrib - mean_bayer;
-        mean_bayer += delta_bayer / float(samples);
-        float delta2_bayer = contrib - mean_bayer;
-        m2_bayer += delta_bayer * delta2_bayer;
+        sample_bayer += contrib;
       }
+    }
+
+    float3 delta_rgb = sample_rgb - mean_rgb;
+    mean_rgb += delta_rgb / float(samples);
+    float3 delta2_rgb = sample_rgb - mean_rgb;
+    m2_rgb += delta_rgb * delta2_rgb;
+    if (write_bayer) {
+      float delta_bayer = sample_bayer - mean_bayer;
+      mean_bayer += delta_bayer / float(samples);
+      float delta2_bayer = sample_bayer - mean_bayer;
+      m2_bayer += delta_bayer * delta2_bayer;
     }
 
     // Adaptive sampling that also considers neighbouring pixel variance
@@ -1120,6 +1127,7 @@ extern "C" __global__ void __raygen__bayer()
     prd.py = y;
     prd.sample = s;
     prd.rng_dim = 0;
+    float sample = 0.0f;
 
     while (!prd.done) {
       prd.radiance = 0.0f;
@@ -1136,11 +1144,13 @@ extern "C" __global__ void __raygen__bayer()
         0,
         u0, u1);
       float contrib = prd.radiance * prd.throughput;
-      float delta = contrib - mean;
-      mean += delta / float(samples);
-      float delta2 = contrib - mean;
-      m2 += delta * delta2;
+      sample += contrib;
     }
+
+    float delta = sample - mean;
+    mean += delta / float(samples);
+    float delta2 = sample - mean;
+    m2 += delta * delta2;
 
     if (params.noise_threshold > 0.f && samples >= params.min_adaptive_samples) {
       float var = m2 / float(samples - 1);
