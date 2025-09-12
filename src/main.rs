@@ -1,12 +1,5 @@
-use avif_parse::read_avif;
-use avif_serialize::constants::{
-    ColorPrimaries, MatrixCoefficients as SerializeMatrixCoefficients, TransferCharacteristics,
-};
-use rav1e::color::PixelRange;
-use ravif::{BitDepth, MatrixCoefficients};
+use exr::prelude::write_rgb_file;
 use std::ffi::c_int;
-use std::fs::File;
-use std::io;
 use std::time::Instant;
 
 // ---- FFI ----------------------------------------------------------
@@ -417,242 +410,35 @@ fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
 fn demosaic(raw: &[f32], w: i32, h: i32, pattern: i32) -> Vec<f32> {
     demosaic_amaze(raw, w, h, pattern)
 }
-/// 3D color lookup table loaded from a `.cube` file.
-struct CubeLut {
-    size: usize,
-    table: Vec<[f32; 3]>,
-}
-
-impl CubeLut {
-    /// Load a LUT from a `.cube` file on disk.
-    fn from_file(path: &str) -> Result<Self, io::Error> {
-        let data = std::fs::read_to_string(path)?;
-        let mut size = 0usize;
-        let mut table = Vec::new();
-        for line in data.lines() {
-            let line = line.trim();
-            if line.is_empty()
-                || line.starts_with('#')
-                || line.starts_with("TITLE")
-                || line.starts_with("DOMAIN_MIN")
-                || line.starts_with("DOMAIN_MAX")
-            {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("LUT_3D_SIZE") {
-                size = rest
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                table.reserve(size * size * size);
-                continue;
-            }
-            let cols: Vec<_> = line.split_whitespace().collect();
-            if cols.len() == 3 {
-                let r = cols[0]
-                    .parse::<f32>()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let g = cols[1]
-                    .parse::<f32>()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let b = cols[2]
-                    .parse::<f32>()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                table.push([r, g, b]);
-            }
-        }
-        if size == 0 || table.len() != size * size * size {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid LUT"));
-        }
-        Ok(Self { size, table })
-    }
-
-    /// Sample the LUT using tetrahedral interpolation.
-    fn sample(&self, r: f32, g: f32, b: f32) -> [f32; 3] {
-        let n = self.size as i32;
-        let max = (n - 1) as f32;
-        let fr = r.clamp(0.0, 1.0) * max;
-        let fg = g.clamp(0.0, 1.0) * max;
-        let fb = b.clamp(0.0, 1.0) * max;
-        let r0 = fr.floor() as i32;
-        let g0 = fg.floor() as i32;
-        let b0 = fb.floor() as i32;
-        let dr = fr - r0 as f32;
-        let dg = fg - g0 as f32;
-        let db = fb - b0 as f32;
-        let r1 = (r0 + 1).min(n - 1);
-        let g1 = (g0 + 1).min(n - 1);
-        let b1 = (b0 + 1).min(n - 1);
-        let idx = |ri: i32, gi: i32, bi: i32| -> usize {
-            ((ri as usize) * self.size + gi as usize) * self.size + bi as usize
-        };
-        let c000 = self.table[idx(r0, g0, b0)];
-        let c100 = self.table[idx(r1, g0, b0)];
-        let c010 = self.table[idx(r0, g1, b0)];
-        let c001 = self.table[idx(r0, g0, b1)];
-        let c110 = self.table[idx(r1, g1, b0)];
-        let c101 = self.table[idx(r1, g0, b1)];
-        let c011 = self.table[idx(r0, g1, b1)];
-        let c111 = self.table[idx(r1, g1, b1)];
-        let mut out = [0.0; 3];
-        for i in 0..3 {
-            out[i] = if dr >= dg {
-                if dg >= db {
-                    c000[i]
-                        + dr * (c100[i] - c000[i])
-                        + dg * (c110[i] - c100[i])
-                        + db * (c111[i] - c110[i])
-                } else if dr >= db {
-                    c000[i]
-                        + dr * (c100[i] - c000[i])
-                        + db * (c101[i] - c100[i])
-                        + dg * (c111[i] - c101[i])
-                } else {
-                    c000[i]
-                        + db * (c001[i] - c000[i])
-                        + dr * (c101[i] - c001[i])
-                        + dg * (c111[i] - c101[i])
-                }
-            } else if dr >= db {
-                c000[i]
-                    + dg * (c010[i] - c000[i])
-                    + dr * (c110[i] - c010[i])
-                    + db * (c111[i] - c110[i])
-            } else if dg >= db {
-                c000[i]
-                    + dg * (c010[i] - c000[i])
-                    + db * (c011[i] - c010[i])
-                    + dr * (c111[i] - c011[i])
-            } else {
-                c000[i]
-                    + db * (c001[i] - c000[i])
-                    + dg * (c011[i] - c001[i])
-                    + dr * (c111[i] - c011[i])
-            };
-        }
-        out
-    }
-}
-/// Save an ACEScg image to an 8-bit sRGB PNG file.
+/// Save a linear RGB image to an OpenEXR file.
 ///
-/// `img_aces` must have `w * h * 3` elements. `exposure` scales the pixel values before
-/// the LUT is applied.
-fn save_png_srgb_from_acescg(
+/// `img` must contain `w * h * 3` values in row-major order. `exposure` scales the
+/// linear pixel values before writing.
+fn save_exr_linear(
     path: &str,
     w: i32,
     h: i32,
-    img_aces: &[f32],
+    img: &[f32],
     exposure: f32,
-) -> Result<(), io::Error> {
-    let lut = CubeLut::from_file("luts/ACEScg_Linear_to_Rec709_sRGB_65pt.cube")?;
-    let mut buf = vec![0u8; (w * h * 3) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let i = idx(x, y, w) * 3;
-            let rgb = lut.sample(
-                img_aces[i + 0] * exposure,
-                img_aces[i + 1] * exposure,
-                img_aces[i + 2] * exposure,
-            );
-            buf[i + 0] = (rgb[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            buf[i + 1] = (rgb[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            buf[i + 2] = (rgb[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        }
-    }
-    let file = File::create(path)?;
-    let mut enc = png::Encoder::new(file, w as u32, h as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-    let mut writer = enc.write_header()?;
-    writer.write_image_data(&buf)?;
-    Ok(())
-}
-/// Save an ACEScg image as a 10-bit Rec.2100 PQ AVIF file.
-///
-/// `img_aces` must contain `w * h * 3` values. `exposure` scales values before the LUT
-/// is applied.
-fn save_avif_rec2100_pq_from_acescg(
-    path: &str,
-    w: i32,
-    h: i32,
-    img_aces: &[f32],
-    exposure: f32,
-) -> Result<(), io::Error> {
-    let n = (w * h) as usize;
-    let mut rgb10: Vec<rgb::RGB<u16>> = Vec::with_capacity(n);
-    let lut = CubeLut::from_file("luts/ACEScg_Linear_to_Rec2100_PQ_65pt.cube")?;
-    for y in 0..h {
-        for x in 0..w {
-            let i = idx(x, y, w) * 3;
-            let rgb = lut.sample(
-                img_aces[i] * exposure,
-                img_aces[i + 1] * exposure,
-                img_aces[i + 2] * exposure,
-            );
-            let r10 = (rgb[0].clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
-            let g10 = (rgb[1].clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
-            let b10 = (rgb[2].clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
-            rgb10.push(rgb::RGB {
-                r: r10,
-                g: g10,
-                b: b10,
-            });
-        }
-    }
-
-    const BT2020: [f32; 3] = [0.2627, 0.6780, 0.0593];
-    let planes = rgb10.iter().map(|&px| {
-        let r = px.r as f32;
-        let g = px.g as f32;
-        let b = px.b as f32;
-        let y = BT2020[0] * r + BT2020[1] * g + BT2020[2] * b;
-        let cb = (b - y) * (0.5 / (1.0 - BT2020[2])) + 512.0;
-        let cr = (r - y) * (0.5 / (1.0 - BT2020[0])) + 512.0;
-        [y.round() as u16, cb.round() as u16, cr.round() as u16]
-    });
-
-    let enc = ravif::Encoder::new()
-        .with_quality(90.0)
-        .with_speed(6)
-        .with_bit_depth(BitDepth::Ten);
-    let avif = enc
-        .encode_raw_planes_10_bit(
-            w as usize,
-            h as usize,
-            planes,
-            None::<[_; 0]>,
-            PixelRange::Full,
-            MatrixCoefficients::BT2020NCL,
+) -> Result<(), exr::error::Error> {
+    write_rgb_file(path, w as usize, h as usize, |x, y| {
+        let i = idx(x as i32, y as i32, w) * 3;
+        (
+            img[i] * exposure,
+            img[i + 1] * exposure,
+            img[i + 2] * exposure,
         )
-        .expect("avif encode");
-
-    let parsed = read_avif(&mut avif.avif_file.as_slice()).expect("parse avif");
-    let avif_bytes = avif_serialize::Aviffy::new()
-        .set_color_primaries(ColorPrimaries::Bt2020)
-        .set_transfer_characteristics(TransferCharacteristics::Smpte2084)
-        .set_matrix_coefficients(SerializeMatrixCoefficients::Bt2020Ncl)
-        .set_full_color_range(true)
-        .to_vec(
-            &parsed.primary_item,
-            parsed.alpha_item.as_deref(),
-            w as u32,
-            h as u32,
-            10,
-        );
-
-    std::fs::write(path, &avif_bytes)?;
-    Ok(())
+    })
 }
 
 // ---- main -------------------------------------------------------------------
 fn main() {
     let w = 1920;
     let h = 1440;
-    let spp = 50000;
-    let max_depth = 64;
+    let spp = 512;
+    let max_depth = 32;
     let pattern = 0;
-    let noise_threshold = 0.00390625_f32; // 0 disables adaptive sampling
+    let noise_threshold = 0.01_f32; // 0 disables adaptive sampling
     let min_adaptive_samples = 32;
 
     let rgb_bytes = (w * h * 3) as usize * std::mem::size_of::<f32>();
@@ -701,9 +487,9 @@ fn main() {
     let exposure = 1.0f32;
     println!("Exposure multiplier={:.6}", exposure);
 
-    match save_png_srgb_from_acescg("pt.png", w, h, &rgb, exposure) {
-        Ok(_) => println!("✅ Saved pt.png (render {:?})", t_rgb),
-        Err(e) => eprintln!("Failed to save pt.png: {}", e),
+    match save_exr_linear("pt.exr", w, h, &rgb, exposure) {
+        Ok(_) => println!("✅ Saved pt.exr (render {:?})", t_rgb),
+        Err(e) => eprintln!("Failed to save pt.exr: {}", e),
     }
 
     let t2 = Instant::now();
@@ -720,17 +506,9 @@ fn main() {
         t_demosaic
     );
 
-    match save_png_srgb_from_acescg("pt_bayer.png", w, h, &demosaiced, exposure) {
-        Ok(_) => println!("✅ Saved pt_bayer.png"),
-        Err(e) => eprintln!("Failed to save pt_bayer.png: {}", e),
-    }
-    if let Err(e) = save_avif_rec2100_pq_from_acescg("pt_pq.avif", w, h, &rgb, exposure) {
-        eprintln!("Failed to save pt_pq.avif: {}", e);
-    }
-    if let Err(e) =
-        save_avif_rec2100_pq_from_acescg("pt_bayer_pq.avif", w, h, &demosaiced, exposure)
-    {
-        eprintln!("Failed to save pt_bayer_pq.avif: {}", e);
+    match save_exr_linear("pt_bayer.exr", w, h, &demosaiced, exposure) {
+        Ok(_) => println!("✅ Saved pt_bayer.exr"),
+        Err(e) => eprintln!("Failed to save pt_bayer.exr: {}", e),
     }
 
     unsafe {

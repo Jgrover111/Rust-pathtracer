@@ -26,15 +26,10 @@ cargo run --release
 
 ## Outputs
 
-| Image | Description |
-|-------|-------------|
-| ![Path traced RGB output](pt.png) | Tone-mapped RGB output |
-| ![Demosaiced Bayer output](pt_bayer.png) | Result after demosaicing the Bayer render |
-
-Additional HDR versions are available as AVIF files:
-
-- [HDR RGB](pt_pq.avif)
-- [HDR Bayer](pt_bayer_pq.avif)
+| File | Description |
+|------|-------------|
+| `pt.exr` | Path traced RGB output (linear OpenEXR) |
+| `pt_bayer.exr` | Result after demosaicing the Bayer render (linear OpenEXR) |
 
 ## License
 
