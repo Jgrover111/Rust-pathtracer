@@ -1030,7 +1030,7 @@ static int optix_ctx_render_bayer_f32(void* handle, int spp, int max_depth, floa
         s.h_params.active_pixels = s.d_active_in;
         CU_CHECK(cuMemcpyHtoDAsync(s.d_params, &s.h_params, sizeof(Params), s.stream));
 
-        OTK_CHECK(optixLaunch(s.pipeline, s.stream, s.d_params, sizeof(Params), &s.sbt_bayer, active, 1, 1));
+        OTK_CHECK(optixLaunch(s.pipeline, s.stream, s.d_params, sizeof(Params), &s.sbt_rgb, active, 1, 1));
 
         CU_CHECK(cuMemsetD32Async(s.d_active_count, 0, 1, s.stream));
         void* compArgs[] = { &s.d_active_in, &s.d_flags, &s.d_active_out, &s.d_active_count, &active };
