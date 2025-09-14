@@ -5,8 +5,16 @@
 #include <stdint.h>
 #include <math_constants.h>
 
-struct GuideRegion { float3 bmin,bmax; uint32_t lobe_ofs,lobe_num; };
-struct GuideLobe   { float3 mu; float kappa; float weight; float3 rgb; };
+struct GuideRegion {
+  float3 bmin, bmax;
+  uint32_t lobe_ofs, lobe_num;
+};
+struct GuideLobe {
+  float3 mu;
+  float kappa;
+  float weight;
+  float3 rgb;  // accumulated color for this lobe
+};
 struct GuideGPU {
   CUdeviceptr d_regions; uint32_t region_count;
   CUdeviceptr d_lobes;   uint32_t lobe_count;
