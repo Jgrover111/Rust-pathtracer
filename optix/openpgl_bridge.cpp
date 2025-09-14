@@ -44,17 +44,31 @@ pgl_samples_t pgl_samples_create() { return new SampleStorageRGB; }
 
 void pgl_samples_destroy(pgl_samples_t s) { delete static_cast<SampleStorageRGB *>(s); }
 
-void pgl_samples_add_surface(pgl_samples_t handle, const float pos[3], const float dir_in[3], const float weight_rgb[3], int is_delta) {
-    auto *s = static_cast<SampleStorageRGB *>(handle);
+static void add_sample(SampleStorageRGB *s, const float pos[3], const float dir_in[3], const float weight_rgb[3], uint32_t flags) {
     SampleData sample{};
     pglPoint3f(sample.position, pos[0], pos[1], pos[2]);
     sample.direction = {dir_in[0], dir_in[1], dir_in[2]};
     sample.weight = (weight_rgb[0] + weight_rgb[1] + weight_rgb[2]) / 3.0f;
     sample.pdf = 1.0f;
     sample.distance = 0.0f;
-    sample.flags = is_delta ? PGLSampleData::EDirectLight : 0u;
+    sample.flags = flags;
     s->storage.AddSample(sample);
     s->colors.push_back({weight_rgb[0], weight_rgb[1], weight_rgb[2]});
+}
+
+void pgl_samples_add_surface(pgl_samples_t handle, const float pos[3], const float dir_in[3], const float weight_rgb[3], int is_delta) {
+    auto *s = static_cast<SampleStorageRGB *>(handle);
+    add_sample(s, pos, dir_in, weight_rgb, is_delta ? PGLSampleData::EDirectLight : 0u);
+}
+
+void pgl_samples_add_volume(pgl_samples_t handle, const float pos[3], const float dir_in[3], const float weight_rgb[3]) {
+    auto *s = static_cast<SampleStorageRGB *>(handle);
+    add_sample(s, pos, dir_in, weight_rgb, PGLSampleData::EInsideVolume);
+}
+
+void pgl_samples_add_direct(pgl_samples_t handle, const float pos[3], const float dir_in[3], const float weight_rgb[3]) {
+    auto *s = static_cast<SampleStorageRGB *>(handle);
+    add_sample(s, pos, dir_in, weight_rgb, PGLSampleData::EDirectLight);
 }
 
 void pgl_field_update(pgl_field_t field_handle, pgl_samples_t samples_handle) {
@@ -91,10 +105,37 @@ void pgl_field_update(pgl_field_t field_handle, pgl_samples_t samples_handle) {
                p.v[2] >= b.lower.v[2] && p.v[2] <= b.upper.v[2];
     };
 
-    const size_t sampleCount = samples->storage.GetSizeSurface();
-    for (size_t i = 0; i < sampleCount; ++i) {
+    size_t colorIdx = 0;
+    const size_t sampleCountSurf = samples->storage.GetSizeSurface();
+    for (size_t i = 0; i < sampleCountSurf; ++i) {
         SampleData sd = samples->storage.GetSampleSurface(static_cast<int>(i));
-        const pgl_vec3f &col = samples->colors[i];
+        const pgl_vec3f &col = samples->colors[colorIdx++];
+        for (const auto &reg : regions) {
+            if (!inside(reg.bounds, sd.position))
+                continue;
+            float best = -std::numeric_limits<float>::infinity();
+            uint32_t bestIdx = 0;
+            for (uint32_t j = 0; j < reg.lobes.size(); ++j) {
+                const PGLVMMLobe &l = reg.lobes[j];
+                float d = sd.direction.v[0] * l.mu.v[0] +
+                          sd.direction.v[1] * l.mu.v[1] +
+                          sd.direction.v[2] * l.mu.v[2];
+                if (d > best) {
+                    best = d;
+                    bestIdx = j;
+                }
+            }
+            pgl_vec3f &dst = g_lobe_rgb[reg.lobe_ofs + bestIdx];
+            dst.v[0] += col.v[0];
+            dst.v[1] += col.v[1];
+            dst.v[2] += col.v[2];
+            break;
+        }
+    }
+    const size_t sampleCountVol = samples->storage.GetSizeVolume();
+    for (size_t i = 0; i < sampleCountVol; ++i) {
+        SampleData sd = samples->storage.GetSampleVolume(static_cast<int>(i));
+        const pgl_vec3f &col = samples->colors[colorIdx++];
         for (const auto &reg : regions) {
             if (!inside(reg.bounds, sd.position))
                 continue;
@@ -120,6 +161,7 @@ void pgl_field_update(pgl_field_t field_handle, pgl_samples_t samples_handle) {
 
     field->Update(samples->storage);
     samples->storage.ClearSurface();
+    samples->storage.ClearVolume();
     samples->colors.clear();
 }
 

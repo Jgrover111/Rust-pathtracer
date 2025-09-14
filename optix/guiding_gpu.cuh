@@ -25,7 +25,12 @@ struct TrainSample {
   float3 position;
   float3 dir_in;
   float3 contrib;
-  uint32_t is_delta;
+  uint32_t flags;
+};
+
+enum TrainSampleFlag {
+  TSF_VOLUME      = 1u << 0,
+  TSF_DIRECT_LIGHT= 1u << 1,
 };
 
 extern __device__ TrainSample* g_train_samples;

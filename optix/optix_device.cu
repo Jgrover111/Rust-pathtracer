@@ -434,7 +434,7 @@ extern "C" __global__ void __closesthit__ch()
         s.position = P;
         s.dir_in = -prd.direction;
         s.contrib = prd.throughput;
-        s.is_delta = 0u;
+        s.flags = 0u;
         uint32_t idx = atomicAdd(g_train_write_idx, 1u);
         if (g_train_sample_capacity) idx %= g_train_sample_capacity;
         g_train_samples[idx] = s;
@@ -557,6 +557,16 @@ extern "C" __global__ void __closesthit__ch()
         float pdf_light = dist2 / (cosL * area);
         float w_bsdf = prd.prev_pdf_bsdf / (prd.prev_pdf_bsdf + pdf_light);
         emission = emission * w_bsdf;
+    }
+    if (g_train_samples && g_train_write_idx && (emission.x > 0.f || emission.y > 0.f || emission.z > 0.f)) {
+        TrainSample s;
+        s.position = P;
+        s.dir_in = -prd.direction;
+        s.contrib = prd.throughput * emission;
+        s.flags = TSF_DIRECT_LIGHT;
+        uint32_t idx = atomicAdd(g_train_write_idx, 1u);
+        if (g_train_sample_capacity) idx %= g_train_sample_capacity;
+        g_train_samples[idx] = s;
     }
     prd.radiance += emission + Lo;
 

@@ -22,6 +22,14 @@ void pgl_samples_add_surface(pgl_samples_t s,
    const float dir_in[3],
    const float weight_rgb[3],
    int is_delta);
+void pgl_samples_add_volume(pgl_samples_t s,
+   const float pos[3],
+   const float dir_in[3],
+   const float weight_rgb[3]);
+void pgl_samples_add_direct(pgl_samples_t s,
+   const float pos[3],
+   const float dir_in[3],
+   const float weight_rgb[3]);
 
 void pgl_field_update(pgl_field_t, pgl_samples_t);
 
