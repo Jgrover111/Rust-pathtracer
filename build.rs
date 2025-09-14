@@ -3,6 +3,10 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=optix/CMakeLists.txt");
     println!("cargo:rerun-if-changed=optix/optix_wrapper.cpp");
+    println!("cargo:rerun-if-changed=optix/openpgl_bridge.cpp");
+    println!("cargo:rerun-if-changed=optix/openpgl_bridge.h");
+    println!("cargo:rerun-if-changed=optix/guiding_gpu.h");
+    println!("cargo:rerun-if-changed=optix/guiding_gpu.cuh");
     println!("cargo:rerun-if-changed=optix/optix_device.cu");
     println!("cargo:rerun-if-changed=optix/cuda_kernels.cu");
 
