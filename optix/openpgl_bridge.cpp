@@ -6,6 +6,8 @@
 #include <openpgl/cpp/Device.h>
 #include <openpgl/cpp/Field.h>
 #include <openpgl/cpp/FieldConfig.h>
+#include <openpgl/cpp/Region.h>
+#include <openpgl/cpp/Distribution.h>
 #include <openpgl/cpp/SampleData.h>
 #include <openpgl/cpp/SampleStorage.h>
 
@@ -60,12 +62,57 @@ void pgl_field_update(pgl_field_t field_handle, pgl_samples_t samples_handle) {
     samples->colors.clear();
 }
 
-void pgl_field_snapshot(pgl_field_t, const pgl_region **regions, uint32_t *region_count, const pgl_lobe **lobes, uint32_t *lobe_count) {
+void pgl_field_snapshot(pgl_field_t field_handle,
+                        const pgl_region **regions, uint32_t *region_count,
+                        const pgl_lobe **lobes, uint32_t *lobe_count) {
     static std::vector<pgl_region> reg_vec;
     static std::vector<pgl_lobe> lobe_vec;
 
     reg_vec.clear();
     lobe_vec.clear();
+
+    auto *field = static_cast<Field *>(field_handle);
+    if (field) {
+        const size_t regionCount = field->GetRegionCount();
+        std::vector<PGLRegion> regionHandles(regionCount);
+        field->GetRegions(regionHandles.data());
+
+        uint32_t lobeOffset = 0;
+        for (size_t i = 0; i < regionHandles.size(); ++i) {
+            PGLRegion regHandle = regionHandles[i];
+            pgl_box3f bounds = pglRegionGetBounds(regHandle);
+
+            pgl_region reg{};
+            reg.bmin[0] = bounds.lower.v[0];
+            reg.bmin[1] = bounds.lower.v[1];
+            reg.bmin[2] = bounds.lower.v[2];
+            reg.bmax[0] = bounds.upper.v[0];
+            reg.bmax[1] = bounds.upper.v[1];
+            reg.bmax[2] = bounds.upper.v[2];
+            reg.lobe_ofs = lobeOffset;
+
+            const size_t lobeCountRegion = field->GetRegionLobeCount(regHandle);
+            reg.lobe_num = static_cast<uint32_t>(lobeCountRegion);
+
+            std::vector<PGLVMMLobe> lobesSrc(lobeCountRegion);
+            field->GetRegionLobes(regHandle, lobesSrc.data());
+
+            for (size_t j = 0; j < lobesSrc.size(); ++j) {
+                const PGLVMMLobe &src = lobesSrc[j];
+                pgl_lobe l{};
+                l.mu[0] = src.mu.v[0];
+                l.mu[1] = src.mu.v[1];
+                l.mu[2] = src.mu.v[2];
+                l.kappa = src.kappa;
+                l.weight = src.weight;
+                l.rgb[0] = l.rgb[1] = l.rgb[2] = src.weight;
+                lobe_vec.push_back(l);
+            }
+
+            lobeOffset += static_cast<uint32_t>(lobeCountRegion);
+            reg_vec.push_back(reg);
+        }
+    }
 
     if (regions)
         *regions = reg_vec.data();
