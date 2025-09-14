@@ -254,95 +254,6 @@ struct PRDScalar {
     int    rng_dim;
 };
 
-static __forceinline__ __device__ float luminance(const float3& c)
-{
-    return c.x * 0.2126f + c.y * 0.7152f + c.z * 0.0722f;
-}
-
-static __forceinline__ __device__ float3 sample_guided_dir(PRD& prd, const float3& P, const float3& Ng, float& pdf, float& cosTheta)
-{
-    const GuideGPU* G = reinterpret_cast<const GuideGPU*>(params.d_guiding);
-    if (!G || G->d_regions == 0 || G->d_lobes == 0 || G->d_grid == 0) {
-        float r1 = next_rand(prd);
-        float r2 = next_rand(prd);
-        const float phi = 2.0f * CUDART_PI_F * r1;
-        cosTheta = sqrtf(1.0f - r2);
-        const float sinTheta = sqrtf(r2);
-        float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
-        float3 t, b;
-        make_onb(Ng, t, b);
-        float3 newDir = normalize(localDir.x * t + localDir.y * b + localDir.z * Ng);
-        pdf = cosTheta * (1.0f / CUDART_PI_F);
-        return newDir;
-    }
-    int region_id = guiding_region_id(*G, P);
-    if (region_id < 0) {
-        float r1 = next_rand(prd);
-        float r2 = next_rand(prd);
-        const float phi = 2.0f * CUDART_PI_F * r1;
-        cosTheta = sqrtf(1.0f - r2);
-        const float sinTheta = sqrtf(r2);
-        float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
-        float3 t, b;
-        make_onb(Ng, t, b);
-        float3 newDir = normalize(localDir.x * t + localDir.y * b + localDir.z * Ng);
-        pdf = cosTheta * (1.0f / CUDART_PI_F);
-        return newDir;
-    }
-    const GuideRegion* regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
-    const GuideRegion& R = regions[region_id];
-    const GuideLobe* lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
-    int lobe_idx = guiding_choose_lobe(R, lobes, next_rand(prd));
-    if (lobe_idx < 0) {
-        float r1 = next_rand(prd);
-        float r2 = next_rand(prd);
-        const float phi = 2.0f * CUDART_PI_F * r1;
-        cosTheta = sqrtf(1.0f - r2);
-        const float sinTheta = sqrtf(r2);
-        float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
-        float3 t, b;
-        make_onb(Ng, t, b);
-        float3 newDir = normalize(localDir.x * t + localDir.y * b + localDir.z * Ng);
-        pdf = cosTheta * (1.0f / CUDART_PI_F);
-        return newDir;
-    }
-    float2 u = make_float2(next_rand(prd), next_rand(prd));
-    float3 dir = guiding_sample_lobe(lobes[lobe_idx], u);
-    cosTheta = fmaxf(dot(dir, Ng), 0.f);
-    pdf = guiding_mixture_pdf(R, lobes, dir);
-    return dir;
-}
-
-static __forceinline__ __device__ float guiding_pdf(const float3& P, const float3& wi)
-{
-    if (params.d_guiding == 0) return 0.f;
-    const GuideGPU* G = reinterpret_cast<const GuideGPU*>(params.d_guiding);
-    if (!G || G->d_regions == 0 || G->d_lobes == 0 || G->d_grid == 0) return 0.f;
-    int region_id = guiding_region_id(*G, P);
-    if (region_id < 0) return 0.f;
-    const GuideRegion* regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
-    const GuideRegion& R = regions[region_id];
-    const GuideLobe* lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
-    return guiding_mixture_pdf(R, lobes, wi);
-}
-
-static __forceinline__ __device__ float guiding_strength(const float3& P)
-{
-    if (params.d_guiding == 0) return 0.f;
-    const GuideGPU* G = reinterpret_cast<const GuideGPU*>(params.d_guiding);
-    if (!G || G->d_regions == 0 || G->d_lobes == 0 || G->d_grid == 0) return 0.f;
-    int region_id = guiding_region_id(*G, P);
-    if (region_id < 0) return 0.f;
-    const GuideRegion* regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
-    const GuideRegion& R = regions[region_id];
-    const GuideLobe* lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
-    float sum = 0.f;
-    for (uint32_t i = 0; i < R.lobe_num; ++i) sum += lobes[i].weight;
-    return sum / (sum + 1.f);
-}
-
-static __forceinline__ __device__ void update_guiding(const float3&, const float3&, float) {}
-
 static __forceinline__ __device__ float3 reflect(const float3& i, const float3& n)
 {
   return i - 2.0f * dot(i, n) * n;
@@ -675,12 +586,28 @@ extern "C" __global__ void __closesthit__ch()
     } else {
         float3 newDir;
         float cosTheta;
-        float pdf_guided = 0.f;
-        float guideWeight = guiding_strength(P);
-        bool guided = (guideWeight > 0.f) && (next_rand(prd) < guideWeight);
-        if (guided) {
-            newDir = sample_guided_dir(prd, P, Ng, pdf_guided, cosTheta);
-        } else {
+        float p_guided = 0.f;
+        const GuideGPU* G = reinterpret_cast<const GuideGPU*>(params.d_guiding);
+        bool used_guiding = false;
+        if (G && G->d_regions && G->d_lobes && G->d_grid) {
+            int region_id = guiding_region_id(*G, P);
+            if (region_id >= 0) {
+                const GuideRegion* regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
+                const GuideRegion& R = regions[region_id];
+                if (R.lobe_num > 0) {
+                    const GuideLobe* lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
+                    int lobe_idx = guiding_choose_lobe(R, lobes, next_rand(prd));
+                    if (lobe_idx >= 0) {
+                        float2 u = make_float2(next_rand(prd), next_rand(prd));
+                        newDir = guiding_sample_lobe(lobes[lobe_idx], u);
+                        cosTheta = fmaxf(dot(newDir, Ng), 0.0f);
+                        p_guided = guiding_mixture_pdf(R, lobes, newDir);
+                        used_guiding = true;
+                    }
+                }
+            }
+        }
+        if (!used_guiding) {
             float r1 = next_rand(prd);
             float r2 = next_rand(prd);
             const float phi = 2.0f * CUDART_PI_F * r1;
@@ -690,19 +617,17 @@ extern "C" __global__ void __closesthit__ch()
             float3 tangent, bitangent;
             make_onb(Ng, tangent, bitangent);
             newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
-            pdf_guided = guiding_pdf(P, newDir);
         }
 
         prd.origin = P + Ng * 1e-3f;
         prd.direction = newDir;
 
-        float pdf_uniform = cosTheta * (1.0f / CUDART_PI_F);
-        float final_pdf = guideWeight * pdf_guided + (1.0f - guideWeight) * pdf_uniform;
+        float p_bsdf = cosTheta * (1.0f / CUDART_PI_F);
+        float final_pdf = p_bsdf + p_guided;
         prd.throughput = mul(prd.throughput, kd);
         prd.throughput = prd.throughput * (cosTheta / (CUDART_PI_F * final_pdf * diff_prob));
-        prd.prev_pdf_bsdf = final_pdf * diff_prob;
+        prd.prev_pdf_bsdf = (used_guiding ? p_guided : p_bsdf) * diff_prob;
         prd.prev_pdf_valid = 1;
-        update_guiding(newDir, Ng, luminance(prd.throughput));
     }
 
     prd.depth++;
