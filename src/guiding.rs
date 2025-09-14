@@ -7,8 +7,11 @@ pub struct TrainSample {
     pub position: [f32; 3],
     pub dir_in: [f32; 3],
     pub contrib: [f32; 3],
-    pub is_delta: u32,
+    pub flags: u32,
 }
+
+pub const TSF_VOLUME: u32 = 1u << 0;
+pub const TSF_DIRECT_LIGHT: u32 = 1u << 1;
 
 #[cfg(feature = "guiding")]
 #[repr(C)]
@@ -45,6 +48,18 @@ extern "C" {
         dir_in: *const f32,
         weight_rgb: *const f32,
         is_delta: c_int,
+    );
+    pub fn pgl_samples_add_volume(
+        s: *mut c_void,
+        pos: *const f32,
+        dir_in: *const f32,
+        weight_rgb: *const f32,
+    );
+    pub fn pgl_samples_add_direct(
+        s: *mut c_void,
+        pos: *const f32,
+        dir_in: *const f32,
+        weight_rgb: *const f32,
     );
     pub fn pgl_field_update(field: *mut c_void, samples: *mut c_void);
     pub fn pgl_field_snapshot(
@@ -206,13 +221,29 @@ impl GuidingState {
             if !ptr.is_null() && count > 0 {
                 let slice = std::slice::from_raw_parts(ptr, count as usize);
                 for ts in slice {
-                    pgl_samples_add_surface(
-                        samples_ptr,
-                        ts.position.as_ptr(),
-                        ts.dir_in.as_ptr(),
-                        ts.contrib.as_ptr(),
-                        ts.is_delta as c_int,
-                    );
+                    if ts.flags & TSF_DIRECT_LIGHT != 0 {
+                        pgl_samples_add_direct(
+                            samples_ptr,
+                            ts.position.as_ptr(),
+                            ts.dir_in.as_ptr(),
+                            ts.contrib.as_ptr(),
+                        );
+                    } else if ts.flags & TSF_VOLUME != 0 {
+                        pgl_samples_add_volume(
+                            samples_ptr,
+                            ts.position.as_ptr(),
+                            ts.dir_in.as_ptr(),
+                            ts.contrib.as_ptr(),
+                        );
+                    } else {
+                        pgl_samples_add_surface(
+                            samples_ptr,
+                            ts.position.as_ptr(),
+                            ts.dir_in.as_ptr(),
+                            ts.contrib.as_ptr(),
+                            0,
+                        );
+                    }
                 }
             }
             guiding_reset_train_write_idx();
