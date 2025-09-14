@@ -62,6 +62,7 @@ extern "C" {
     );
     pub fn guiding_set_enabled(enabled: c_int);
     pub fn guiding_set_train_buffer_size(n: u32);
+    pub fn guiding_set_grid_res(x: c_int, y: c_int, z: c_int);
     pub fn guiding_map_train_samples(samples: *mut *const TrainSample, count: *mut u32);
     pub fn guiding_reset_train_write_idx();
 }
@@ -147,6 +148,7 @@ pub struct GuidingState {
     dev: Option<Device>,
     field: Option<Field>,
     samples: Option<Samples>,
+    grid_res: [i32; 3],
     update_interval: u32,
     frame_idx: u32,
 }
@@ -157,12 +159,18 @@ impl GuidingState {
         enabled: bool,
         scene_min: [f32; 3],
         scene_max: [f32; 3],
+        grid_res: [i32; 3],
         update_interval: u32,
         train_capacity: u32,
     ) -> Self {
         unsafe {
             guiding_set_enabled(if enabled { 1 } else { 0 });
             guiding_set_train_buffer_size(train_capacity);
+            guiding_set_grid_res(
+                grid_res[0] as c_int,
+                grid_res[1] as c_int,
+                grid_res[2] as c_int,
+            );
         }
         let dev = if enabled { Device::new(0) } else { None };
         let field = if enabled {
@@ -177,6 +185,7 @@ impl GuidingState {
             dev,
             field,
             samples,
+            grid_res,
             update_interval,
             frame_idx: 0,
         }

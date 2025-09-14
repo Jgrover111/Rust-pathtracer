@@ -440,6 +440,7 @@ fn main() {
     let mut guiding_state = {
         let mut enabled = false;
         let mut update_interval: u32 = 1;
+        let mut grid_res: [i32; 3] = [1, 1, 1];
         for arg in std::env::args() {
             if arg == "--guiding" {
                 enabled = true;
@@ -447,11 +448,32 @@ fn main() {
             if let Some(v) = arg.strip_prefix("--guide-update-interval=") {
                 update_interval = v.parse().unwrap_or(1);
             }
+            if let Some(v) = arg.strip_prefix("--guide-grid=") {
+                let parts: Vec<_> = v.split(|c| c == 'x' || c == 'X' || c == ',').collect();
+                if parts.len() == 1 {
+                    if let Ok(n) = parts[0].parse() {
+                        grid_res = [n, n, n];
+                    }
+                } else if parts.len() == 3 {
+                    if let (Ok(x), Ok(y), Ok(z)) =
+                        (parts[0].parse(), parts[1].parse(), parts[2].parse())
+                    {
+                        grid_res = [x, y, z];
+                    }
+                }
+            }
         }
         let scene_min = [-1.0, -1.0, 0.0];
         let scene_max = [1.0, 1.0, 2.0];
         let train_cap = 1 << 18;
-        guiding::GuidingState::new(enabled, scene_min, scene_max, update_interval, train_cap)
+        guiding::GuidingState::new(
+            enabled,
+            scene_min,
+            scene_max,
+            grid_res,
+            update_interval,
+            train_cap,
+        )
     };
     let w = 1920;
     let h = 1440;
