@@ -7,6 +7,10 @@
 #include <math_constants.h>
 #include "guiding_gpu.cuh"
 
+__device__ TrainSample* g_train_samples = nullptr;
+__device__ uint32_t*    g_train_write_idx = nullptr;
+__device__ uint32_t     g_train_sample_capacity = 0;
+
 // Precomputed constants to avoid repeated division at runtime
 #define INV_UINT16       (1.0f / 65536.0f)
 #define INV_PLASTIC      (1.0f / 1.32471795724474602596f)
