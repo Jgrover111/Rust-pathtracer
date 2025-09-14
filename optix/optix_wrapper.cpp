@@ -14,6 +14,7 @@
 #include <memory>
 #include <cmath>
 #include <fstream>
+#include <algorithm>
 #include <cuda.h>
 #include <vector_types.h>
 #include <vector_functions.h>
@@ -42,9 +43,6 @@
 #define OPTIX_STACK_SIZE_SCALE 1.0f
 #endif
 
-#define GUIDE_PHI_RES 16
-#define GUIDE_THETA_RES 8
-#define GUIDE_BIN_COUNT (GUIDE_PHI_RES * GUIDE_THETA_RES)
 
 // ----- tiny helpers ---------------------------------------------------------
 #define OTK_CHECK(call)                                                          \
@@ -838,8 +836,6 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.light_emit = make_float3(15.f, 15.f, 15.f); // match emissive ceiling light
   st->h_params.light_normal = normalize3(make_float3(0.f, 0.f, -1.f));
   st->h_params.light_half = make_float2(0.3f, 0.3f);
-  st->h_params.d_guiding = st->d_guiding;
-
   // pipeline
   createPipeline(*st);
 
@@ -850,7 +846,9 @@ static State* make_state(uint32_t W, uint32_t H)
   size_t flagBytes   = size_t(W) * size_t(H) * sizeof(uint32_t);
   size_t idxBytes    = size_t(W) * size_t(H) * sizeof(uint32_t);
   size_t sampleBytes = size_t(W) * size_t(H) * sizeof(int);
-  size_t guideBytes  = size_t(GUIDE_BIN_COUNT) * sizeof(float);
+
+  // device-side copy of GuideGPU
+  size_t guideBytes  = sizeof(GuideGPU);
 
   CU_CHECK(cuMemAlloc(&st->d_out_rgb,   rgbBytes));
   CU_CHECK(cuMemAlloc(&st->d_out_bayer, bayerBytes));
@@ -883,6 +881,7 @@ static State* make_state(uint32_t W, uint32_t H)
   st->h_params.bayer_pattern = 0;
   st->h_params.noise_threshold = 0.f;
   st->h_params.min_adaptive_samples = 4;
+  st->h_params.d_guiding = g_guiding_enabled ? st->d_guiding : 0;
 
   // Pin host params so subsequent uploads can use async copies.
   CU_CHECK(cuMemHostRegister(&st->h_params, sizeof(Params), 0));
@@ -1161,7 +1160,77 @@ void guiding_upload_snapshot(const pgl_region* regions, uint32_t n_regions,
   upload(hlobe,g_guiding_gpu.d_lobes);
   g_guiding_gpu.region_count=n_regions;
   g_guiding_gpu.lobe_count=n_lobes;
+
+  // Build a coarse 3D grid over the scene bounding box to map points to regions
+  float3 bmin = make_float3( 1e30f, 1e30f, 1e30f);
+  float3 bmax = make_float3(-1e30f,-1e30f,-1e30f);
+  for(uint32_t i=0;i<n_regions;++i){
+    bmin.x = fminf(bmin.x, hreg[i].bmin.x);
+    bmin.y = fminf(bmin.y, hreg[i].bmin.y);
+    bmin.z = fminf(bmin.z, hreg[i].bmin.z);
+    bmax.x = fmaxf(bmax.x, hreg[i].bmax.x);
+    bmax.y = fmaxf(bmax.y, hreg[i].bmax.y);
+    bmax.z = fmaxf(bmax.z, hreg[i].bmax.z);
+  }
+
+  int3 res = g_guiding_gpu.grid_res;
+  if(res.x<=0) res.x=1;
+  if(res.y<=0) res.y=1;
+  if(res.z<=0) res.z=1;
+
+  float3 extent = make_float3(bmax.x-bmin.x, bmax.y-bmin.y, bmax.z-bmin.z);
+  float3 cell   = make_float3(extent.x/res.x, extent.y/res.y, extent.z/res.z);
+
+  std::vector<uint32_t> grid(size_t(res.x)*size_t(res.y)*size_t(res.z),0xFFFFFFFFu);
+  for(uint32_t r=0;r<n_regions;++r){
+    const GuideRegion& R = hreg[r];
+    int3 lo;
+    lo.x = (int)floorf((R.bmin.x - bmin.x)/cell.x);
+    lo.y = (int)floorf((R.bmin.y - bmin.y)/cell.y);
+    lo.z = (int)floorf((R.bmin.z - bmin.z)/cell.z);
+    int3 hi;
+    hi.x = (int)floorf((R.bmax.x - bmin.x)/cell.x);
+    hi.y = (int)floorf((R.bmax.y - bmin.y)/cell.y);
+    hi.z = (int)floorf((R.bmax.z - bmin.z)/cell.z);
+    lo.x = std::max(0, std::min(res.x-1, lo.x));
+    lo.y = std::max(0, std::min(res.y-1, lo.y));
+    lo.z = std::max(0, std::min(res.z-1, lo.z));
+    hi.x = std::max(0, std::min(res.x-1, hi.x));
+    hi.y = std::max(0, std::min(res.y-1, hi.y));
+    hi.z = std::max(0, std::min(res.z-1, hi.z));
+    for(int z=lo.z;z<=hi.z;++z){
+      for(int y=lo.y;y<=hi.y;++y){
+        for(int x=lo.x;x<=hi.x;++x){
+          size_t idx = (size_t(z)*size_t(res.y) + size_t(y))*size_t(res.x) + size_t(x);
+          if(grid[idx]==0xFFFFFFFFu) grid[idx]=r;
+        }
+      }
+    }
+  }
+
+  upload(grid, g_guiding_gpu.d_grid);
+  g_guiding_gpu.grid_res = res;
+  g_guiding_gpu.grid_min = bmin;
+  g_guiding_gpu.grid_max = bmax;
+  g_guiding_gpu.cell_size = cell;
+
+  // Upload updated GuideGPU struct to device and hook it into Params
+  if(g_handle){
+    auto& st=*reinterpret_cast<State*>(g_handle);
+    if(st.d_guiding){
+      CU_CHECK(cuMemcpyHtoD(st.d_guiding,&g_guiding_gpu,sizeof(GuideGPU)));
+      st.h_params.d_guiding = g_guiding_enabled ? st.d_guiding : 0;
+      CU_CHECK(cuMemcpyHtoDAsync(st.d_params,&st.h_params,sizeof(Params),st.stream));
+    }
+  }
 }
 
 extern "C" __declspec(dllexport)
-void guiding_set_enabled(int enabled){ g_guiding_enabled=enabled; }
+void guiding_set_enabled(int enabled){
+  g_guiding_enabled=enabled;
+  if(g_handle){
+    auto& st=*reinterpret_cast<State*>(g_handle);
+    st.h_params.d_guiding = (enabled && st.d_guiding)? st.d_guiding : 0;
+    CU_CHECK(cuMemcpyHtoDAsync(st.d_params,&st.h_params,sizeof(Params),st.stream));
+  }
+}
