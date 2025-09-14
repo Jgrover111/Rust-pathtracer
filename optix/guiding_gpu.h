@@ -27,6 +27,9 @@ extern "C" {
 void guiding_upload_snapshot(const struct pgl_region* regions,uint32_t n_regions,
                              const struct pgl_lobe* lobes,uint32_t n_lobes);
 void guiding_set_enabled(int enabled);
+void guiding_set_train_buffer_size(uint32_t n);
+void guiding_map_train_samples(const TrainSample** samples, uint32_t* count);
+void guiding_reset_train_write_idx();
 void guiding_set_grid_res(int x,int y,int z);
 
 #ifdef __cplusplus
