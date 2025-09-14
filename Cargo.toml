@@ -25,3 +25,4 @@ codegen-units = 1
 [features]
 default = []
 fast-demosaic = []
+guiding = []

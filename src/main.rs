@@ -1,3 +1,6 @@
+#[cfg(feature = "guiding")]
+mod guiding;
+
 use exr::prelude::write_rgb_file;
 use std::ffi::c_int;
 use std::time::Instant;
@@ -433,6 +436,11 @@ fn save_exr_linear(
 
 // ---- main -------------------------------------------------------------------
 fn main() {
+    #[cfg(feature = "guiding")]
+    let _guiding_state = {
+        let enabled = std::env::args().any(|a| a == "--guiding");
+        guiding::GuidingState::new(enabled)
+    };
     let w = 1920;
     let h = 1440;
     let spp = 512;

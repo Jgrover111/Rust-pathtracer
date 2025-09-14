@@ -89,6 +89,7 @@ target_include_directories(optix_stubs PUBLIC "${OPTIX_ROOT}/include")
 # ---- Host wrapper (DLL) ----
 add_library(optix_wrapper SHARED
         optix_wrapper.cpp
+        openpgl_bridge.cpp
 )
 add_dependencies(optix_wrapper optix_ptx cuda_ptx)
 
@@ -114,6 +115,14 @@ target_compile_definitions(optix_wrapper PRIVATE OPTIX_PTX_PATH=\"${PTX_SLASHED}
 set_target_properties(optix_wrapper PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
+
+find_path(OPENPGL_INCLUDE_DIR openpgl/version.h PATHS ENV OPENPGL_ROOT PATH_SUFFIXES include)
+find_library(OPENPGL_LIBRARY NAMES openpgl PATHS ENV OPENPGL_ROOT PATH_SUFFIXES lib)
+if(OPENPGL_INCLUDE_DIR AND OPENPGL_LIBRARY)
+  target_include_directories(optix_wrapper PRIVATE ${OPENPGL_INCLUDE_DIR})
+  target_link_libraries(optix_wrapper PRIVATE ${OPENPGL_LIBRARY})
+  target_compile_definitions(optix_wrapper PRIVATE HAVE_OPENPGL)
+endif()
 
 target_link_libraries(optix_wrapper
         PRIVATE

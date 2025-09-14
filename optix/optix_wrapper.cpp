@@ -24,6 +24,7 @@
 #include <optix.h>
 #include <optix_stubs.h>
 #include <optix_stack_size.h>
+#include "guiding_gpu.h"
 
 // The PTX path is injected by CMake as -DOPTIX_PTX_PATH=".../optix_device.ptx"
 #ifndef OPTIX_PTX_PATH
@@ -144,6 +145,10 @@ static float3 cross3(const float3& a, const float3& b)
                      a.z*b.x - a.x*b.z,
                      a.x*b.y - a.y*b.x);
 }
+
+static GuideGPU g_guiding_gpu{};
+static int g_guiding_enabled = 0;
+
 
 // ----- SBT record types ------------------------------------------------------
 template<typename T>
@@ -1133,3 +1138,30 @@ void optix_free_host(void* ptr)
 }
 
 
+
+extern "C" __declspec(dllexport)
+void guiding_upload_snapshot(const pgl_region* regions, uint32_t n_regions,
+                             const pgl_lobe* lobes, uint32_t n_lobes)
+{
+  std::vector<GuideRegion> hreg(n_regions);
+  for(uint32_t i=0;i<n_regions;++i){
+    hreg[i].bmin=make_float3(regions[i].bmin[0],regions[i].bmin[1],regions[i].bmin[2]);
+    hreg[i].bmax=make_float3(regions[i].bmax[0],regions[i].bmax[1],regions[i].bmax[2]);
+    hreg[i].lobe_ofs=regions[i].lobe_ofs;
+    hreg[i].lobe_num=regions[i].lobe_num;
+  }
+  std::vector<GuideLobe> hlobe(n_lobes);
+  for(uint32_t i=0;i<n_lobes;++i){
+    hlobe[i].mu=make_float3(lobes[i].mu[0],lobes[i].mu[1],lobes[i].mu[2]);
+    hlobe[i].kappa=lobes[i].kappa;
+    hlobe[i].weight=lobes[i].weight;
+    hlobe[i].rgb=make_float3(lobes[i].rgb[0],lobes[i].rgb[1],lobes[i].rgb[2]);
+  }
+  upload(hreg,g_guiding_gpu.d_regions);
+  upload(hlobe,g_guiding_gpu.d_lobes);
+  g_guiding_gpu.region_count=n_regions;
+  g_guiding_gpu.lobe_count=n_lobes;
+}
+
+extern "C" __declspec(dllexport)
+void guiding_set_enabled(int enabled){ g_guiding_enabled=enabled; }
