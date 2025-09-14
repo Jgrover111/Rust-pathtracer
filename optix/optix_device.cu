@@ -591,23 +591,42 @@ extern "C" __global__ void __closesthit__ch()
         float3 newDir;
         float cosTheta;
         float p_guided = 0.f;
+        float p_bsdf = 0.f;
+        float3 lobe_rgb = make3(1.0f);
         const GuideGPU* G = reinterpret_cast<const GuideGPU*>(params.d_guiding);
-        bool used_guiding = false;
+        const GuideRegion* regions = nullptr;
+        const GuideLobe* lobes = nullptr;
+        GuideRegion R;
+        bool have_guiding = false;
         if (G && G->d_regions && G->d_lobes && G->d_grid) {
             int region_id = guiding_region_id(*G, P);
             if (region_id >= 0) {
-                const GuideRegion* regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
-                const GuideRegion& R = regions[region_id];
+                regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
+                R = regions[region_id];
                 if (R.lobe_num > 0) {
-                    const GuideLobe* lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
-                    int lobe_idx = guiding_choose_lobe(R, lobes, next_rand(prd));
-                    if (lobe_idx >= 0) {
-                        float2 u = make_float2(next_rand(prd), next_rand(prd));
-                        newDir = guiding_sample_lobe(lobes[lobe_idx], u);
-                        cosTheta = fmaxf(dot(newDir, Ng), 0.0f);
-                        p_guided = guiding_mixture_pdf(R, lobes, newDir);
-                        used_guiding = true;
-                    }
+                    lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
+                    have_guiding = true;
+                }
+            }
+        }
+        bool used_guiding = false;
+        int lobe_idx = -1;
+        if (have_guiding) {
+            lobe_idx = guiding_choose_lobe(R, lobes, next_rand(prd), -1);
+            if (lobe_idx >= 0) {
+                float2 u = make_float2(next_rand(prd), next_rand(prd));
+                float3 dir = guiding_sample_lobe(lobes[lobe_idx], u);
+                float cosG = fmaxf(dot(dir, Ng), 0.0f);
+                float p_g = guiding_mixture_pdf(R, lobes, dir);
+                float p_b = cosG * (1.0f / CUDART_PI_F);
+                float choose = next_rand(prd) * (p_g + p_b);
+                if (choose < p_g) {
+                    used_guiding = true;
+                    newDir = dir;
+                    cosTheta = cosG;
+                    p_guided = p_g;
+                    p_bsdf = p_b;
+                    lobe_rgb = lobes[lobe_idx].rgb;
                 }
             }
         }
@@ -621,16 +640,20 @@ extern "C" __global__ void __closesthit__ch()
             float3 tangent, bitangent;
             make_onb(Ng, tangent, bitangent);
             newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
+            p_bsdf = cosTheta * (1.0f / CUDART_PI_F);
+            if (have_guiding)
+                p_guided = guiding_mixture_pdf(R, lobes, newDir);
         }
 
         prd.origin = P + Ng * 1e-3f;
         prd.direction = newDir;
 
-        float p_bsdf = cosTheta * (1.0f / CUDART_PI_F);
-        float final_pdf = p_bsdf + p_guided;
+        float final_pdf = used_guiding ? p_guided : p_bsdf;
         prd.throughput = mul(prd.throughput, kd);
+        if (used_guiding)
+            prd.throughput = mul(prd.throughput, lobe_rgb);
         prd.throughput = prd.throughput * (cosTheta / (CUDART_PI_F * final_pdf * diff_prob));
-        prd.prev_pdf_bsdf = (used_guiding ? p_guided : p_bsdf) * diff_prob;
+        prd.prev_pdf_bsdf = final_pdf * diff_prob;
         prd.prev_pdf_valid = 1;
     }
 
