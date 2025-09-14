@@ -1266,3 +1266,8 @@ extern "C" __declspec(dllexport)
 void guiding_set_train_buffer_size(uint32_t n){
   g_train_sample_capacity = n;
 }
+
+extern "C" __declspec(dllexport)
+void guiding_set_grid_res(int x,int y,int z){
+  g_guiding_gpu.grid_res = make_int3(x,y,z);
+}
