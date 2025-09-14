@@ -513,6 +513,18 @@ extern "C" __global__ void __closesthit__ch()
     const float3 Emission = hg->Emission;
     const float Transmission = hg->Transmission;
 
+    bool is_delta = (Transmission > 0.0f) || (Roughness <= 0.0f);
+    if (!is_delta && g_train_samples && g_train_write_idx) {
+        TrainSample s;
+        s.position = P;
+        s.dir_in = -prd.direction;
+        s.contrib = prd.throughput;
+        s.is_delta = 0u;
+        uint32_t idx = atomicAdd(g_train_write_idx, 1u);
+        if (g_train_sample_capacity) idx %= g_train_sample_capacity;
+        g_train_samples[idx] = s;
+    }
+
     if (Transmission > 0.0f) {
         float3 N = dot(prd.direction, Ng) < 0.0f ? Ng : -Ng;
         float eta = dot(prd.direction, Ng) < 0.0f ? 1.0f / IOR : IOR;

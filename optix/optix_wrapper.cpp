@@ -146,6 +146,7 @@ static float3 cross3(const float3& a, const float3& b)
 
 static GuideGPU g_guiding_gpu{};
 static int g_guiding_enabled = 0;
+static uint32_t g_train_sample_capacity = 0;
 
 
 // ----- SBT record types ------------------------------------------------------
@@ -299,6 +300,10 @@ struct State
   CUstream              stream = nullptr;
   CUstream              copy_stream = nullptr;
 
+  CUdeviceptr           d_train_samples = 0; // TrainSample*
+  CUdeviceptr           d_train_write_idx = 0; // uint32_t*
+  uint32_t              train_sample_capacity = 0;
+
   // kernels
   CUmodule              cu_module = nullptr;
   CUfunction            fn_compact = nullptr;
@@ -318,6 +323,8 @@ struct State
     if (d_active_out) cuMemFree(d_active_out);
     if (d_active_count) cuMemFree(d_active_count);
     if (d_sample_counts) cuMemFree(d_sample_counts);
+    if (d_train_samples) cuMemFree(d_train_samples);
+    if (d_train_write_idx) cuMemFree(d_train_write_idx);
     if (d_params)    cuMemFree(d_params);
     if (d_guiding)   cuMemFree(d_guiding);
     if (copy_stream) cuStreamDestroy(copy_stream);
@@ -863,6 +870,26 @@ static State* make_state(uint32_t W, uint32_t H)
   CU_CHECK(cuMemsetD8(st->d_flags, 0, flagBytes));
   CU_CHECK(cuMemsetD8(st->d_sample_counts, 0, sampleBytes));
   CU_CHECK(cuMemsetD8(st->d_guiding, 0, guideBytes));
+
+  if (g_train_sample_capacity > 0) {
+    st->train_sample_capacity = g_train_sample_capacity;
+    size_t tsBytes = size_t(g_train_sample_capacity) * sizeof(TrainSample);
+    CU_CHECK(cuMemAlloc(&st->d_train_samples, tsBytes));
+    CU_CHECK(cuMemAlloc(&st->d_train_write_idx, sizeof(uint32_t)));
+    CU_CHECK(cuMemsetD32(st->d_train_write_idx, 0, 1));
+
+    auto ptx = readFile(OPTIX_PTX_PATH);
+    CUmodule mod = nullptr;
+    CU_CHECK(cuModuleLoadData(&mod, ptx.data()));
+    CUdeviceptr sym = 0; size_t sz = 0;
+    CU_CHECK(cuModuleGetGlobal(&sym, &sz, mod, "g_train_samples"));
+    CU_CHECK(cuMemcpyHtoD(sym, &st->d_train_samples, sizeof(CUdeviceptr)));
+    CU_CHECK(cuModuleGetGlobal(&sym, &sz, mod, "g_train_write_idx"));
+    CU_CHECK(cuMemcpyHtoD(sym, &st->d_train_write_idx, sizeof(CUdeviceptr)));
+    CU_CHECK(cuModuleGetGlobal(&sym, &sz, mod, "g_train_sample_capacity"));
+    CU_CHECK(cuMemcpyHtoD(sym, &st->train_sample_capacity, sizeof(uint32_t)));
+    CU_CHECK(cuModuleUnload(mod));
+  }
   CU_CHECK(cuStreamCreate(&st->stream, CU_STREAM_NON_BLOCKING));
   CU_CHECK(cuStreamCreate(&st->copy_stream, CU_STREAM_NON_BLOCKING));
 
@@ -1233,4 +1260,9 @@ void guiding_set_enabled(int enabled){
     st.h_params.d_guiding = (enabled && st.d_guiding)? st.d_guiding : 0;
     CU_CHECK(cuMemcpyHtoDAsync(st.d_params,&st.h_params,sizeof(Params),st.stream));
   }
+}
+
+extern "C" __declspec(dllexport)
+void guiding_set_train_buffer_size(uint32_t n){
+  g_train_sample_capacity = n;
 }
