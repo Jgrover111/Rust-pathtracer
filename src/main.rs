@@ -437,9 +437,21 @@ fn save_exr_linear(
 // ---- main -------------------------------------------------------------------
 fn main() {
     #[cfg(feature = "guiding")]
-    let _guiding_state = {
-        let enabled = std::env::args().any(|a| a == "--guiding");
-        guiding::GuidingState::new(enabled)
+    let mut guiding_state = {
+        let mut enabled = false;
+        let mut update_interval: u32 = 1;
+        for arg in std::env::args() {
+            if arg == "--guiding" {
+                enabled = true;
+            }
+            if let Some(v) = arg.strip_prefix("--guide-update-interval=") {
+                update_interval = v.parse().unwrap_or(1);
+            }
+        }
+        let scene_min = [-1.0, -1.0, 0.0];
+        let scene_max = [1.0, 1.0, 2.0];
+        let train_cap = 1 << 18;
+        guiding::GuidingState::new(enabled, scene_min, scene_max, update_interval, train_cap)
     };
     let w = 1920;
     let h = 1440;
@@ -472,6 +484,8 @@ fn main() {
         0
     );
     let t_rgb = t0.elapsed();
+    #[cfg(feature = "guiding")]
+    guiding_state.process_batch();
 
     let t1 = Instant::now();
     assert_eq!(
@@ -488,6 +502,8 @@ fn main() {
         0
     );
     let t_raw = t1.elapsed();
+    #[cfg(feature = "guiding")]
+    guiding_state.process_batch();
     // Synchronize only when the CPU needs to read the GPU output
     unsafe {
         ffi_stream_sync();
