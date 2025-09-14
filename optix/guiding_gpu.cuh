@@ -83,11 +83,26 @@ __device__ inline float vmf_pdf(const float3& mu,float kappa,const float3& wi){
   return norm*expf(kappa*dot3(mu,wi));
 }
 
-__device__ inline int guiding_choose_lobe(const GuideRegion& R,const GuideLobe* L,float u){
-  float sum=0.f; for(uint32_t i=0;i<R.lobe_num;++i) sum+=L[i].weight;
+__device__ inline int guiding_choose_lobe(const GuideRegion& R,const GuideLobe* L,float u,int ch){
+  float sum=0.f;
+  for(uint32_t i=0;i<R.lobe_num;++i){
+    float w=L[i].weight;
+    if(ch==0)      w*=L[i].rgb.x;
+    else if(ch==1) w*=L[i].rgb.y;
+    else if(ch==2) w*=L[i].rgb.z;
+    sum+=w;
+  }
   if(sum<=0.f) return -1;
   float r=u*sum,acc=0.f;
-  for(uint32_t i=0;i<R.lobe_num;++i){acc+=L[i].weight; if(r<=acc) return int(i);}return int(R.lobe_num-1);
+  for(uint32_t i=0;i<R.lobe_num;++i){
+    float w=L[i].weight;
+    if(ch==0)      w*=L[i].rgb.x;
+    else if(ch==1) w*=L[i].rgb.y;
+    else if(ch==2) w*=L[i].rgb.z;
+    acc+=w;
+    if(r<=acc) return int(i);
+  }
+  return int(R.lobe_num-1);
 }
 
 __device__ inline float3 guiding_sample_lobe(const GuideLobe& l,float2 u){
