@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <vector>
+#include <limits>
 
 #include <openpgl/cpp/Device.h>
 #include <openpgl/cpp/Field.h>
@@ -17,6 +18,8 @@ struct SampleStorageRGB {
     SampleStorage storage;
     std::vector<pgl_vec3f> colors;
 };
+
+static std::vector<pgl_vec3f> g_lobe_rgb;
 
 pgl_dev_t pgl_dev_create(int num_threads) {
     return new Device(PGL_DEVICE_TYPE_CPU_4, static_cast<size_t>(num_threads));
@@ -57,6 +60,64 @@ void pgl_samples_add_surface(pgl_samples_t handle, const float pos[3], const flo
 void pgl_field_update(pgl_field_t field_handle, pgl_samples_t samples_handle) {
     auto *field = static_cast<Field *>(field_handle);
     auto *samples = static_cast<SampleStorageRGB *>(samples_handle);
+    const size_t regionCount = field->GetRegionCount();
+    std::vector<PGLRegion> regionHandles(regionCount);
+    field->GetRegions(regionHandles.data());
+
+    struct RegionInfo {
+        pgl_box3f bounds;
+        uint32_t lobe_ofs;
+        std::vector<PGLVMMLobe> lobes;
+    };
+
+    std::vector<RegionInfo> regions(regionCount);
+    uint32_t lobeOffset = 0;
+    for (size_t i = 0; i < regionCount; ++i) {
+        RegionInfo info;
+        info.bounds = pglRegionGetBounds(regionHandles[i]);
+        const size_t lobeCount = field->GetRegionLobeCount(regionHandles[i]);
+        info.lobe_ofs = lobeOffset;
+        info.lobes.resize(lobeCount);
+        field->GetRegionLobes(regionHandles[i], info.lobes.data());
+        regions[i] = info;
+        lobeOffset += static_cast<uint32_t>(lobeCount);
+    }
+
+    g_lobe_rgb.assign(lobeOffset, {0.f, 0.f, 0.f});
+
+    auto inside = [](const pgl_box3f &b, const pgl_point3f &p) {
+        return p.v[0] >= b.lower.v[0] && p.v[0] <= b.upper.v[0] &&
+               p.v[1] >= b.lower.v[1] && p.v[1] <= b.upper.v[1] &&
+               p.v[2] >= b.lower.v[2] && p.v[2] <= b.upper.v[2];
+    };
+
+    const size_t sampleCount = samples->storage.GetSizeSurface();
+    for (size_t i = 0; i < sampleCount; ++i) {
+        SampleData sd = samples->storage.GetSampleSurface(static_cast<int>(i));
+        const pgl_vec3f &col = samples->colors[i];
+        for (const auto &reg : regions) {
+            if (!inside(reg.bounds, sd.position))
+                continue;
+            float best = -std::numeric_limits<float>::infinity();
+            uint32_t bestIdx = 0;
+            for (uint32_t j = 0; j < reg.lobes.size(); ++j) {
+                const PGLVMMLobe &l = reg.lobes[j];
+                float d = sd.direction.v[0] * l.mu.v[0] +
+                          sd.direction.v[1] * l.mu.v[1] +
+                          sd.direction.v[2] * l.mu.v[2];
+                if (d > best) {
+                    best = d;
+                    bestIdx = j;
+                }
+            }
+            pgl_vec3f &dst = g_lobe_rgb[reg.lobe_ofs + bestIdx];
+            dst.v[0] += col.v[0];
+            dst.v[1] += col.v[1];
+            dst.v[2] += col.v[2];
+            break;
+        }
+    }
+
     field->Update(samples->storage);
     samples->storage.ClearSurface();
     samples->colors.clear();
@@ -105,7 +166,14 @@ void pgl_field_snapshot(pgl_field_t field_handle,
                 l.mu[2] = src.mu.v[2];
                 l.kappa = src.kappa;
                 l.weight = src.weight;
-                l.rgb[0] = l.rgb[1] = l.rgb[2] = src.weight;
+                const size_t idx = lobeOffset + j;
+                if (idx < g_lobe_rgb.size()) {
+                    l.rgb[0] = g_lobe_rgb[idx].v[0];
+                    l.rgb[1] = g_lobe_rgb[idx].v[1];
+                    l.rgb[2] = g_lobe_rgb[idx].v[2];
+                } else {
+                    l.rgb[0] = l.rgb[1] = l.rgb[2] = src.weight;
+                }
                 lobe_vec.push_back(l);
             }
 
