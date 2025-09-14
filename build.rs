@@ -10,7 +10,20 @@ fn main() {
     println!("cargo:rerun-if-changed=optix/optix_device.cu");
     println!("cargo:rerun-if-changed=optix/cuda_kernels.cu");
 
+    if PathBuf::from("openpgl").exists() {
+        println!("cargo:rerun-if-changed=openpgl");
+    }
+    println!("cargo:rerun-if-env-changed=OPENPGL_ROOT");
+
     let mut cfg = cmake::Config::new("optix");
+
+    if let Ok(root) = env::var("OPENPGL_ROOT") {
+        cfg.define("OPENPGL_ROOT", &root);
+        let inc = PathBuf::from(&root).join("include");
+        let lib = PathBuf::from(&root).join("lib");
+        println!("cargo:include={}", inc.display());
+        println!("cargo:rustc-link-search=native={}", lib.display());
+    }
 
     // Match cargo profile for clearer builds on Windows
     let build_type = if env::var("PROFILE").unwrap_or_default() == "release" {

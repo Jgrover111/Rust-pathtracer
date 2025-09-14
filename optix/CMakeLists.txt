@@ -16,6 +16,14 @@ set(OPTIX_STACK_SIZE_SCALE 1.0 CACHE STRING
 # ---- CUDA ----
 find_package(CUDAToolkit REQUIRED)
 
+# ---- OpenPGL ----
+# If the OpenPGL sources are vendored, build them as a subproject.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/openpgl/CMakeLists.txt")
+    add_subdirectory(openpgl)
+else()
+    find_package(OpenPGL CONFIG REQUIRED)
+endif()
+
 # ---- OptiX ----
 # Set OPTIX_ROOT to your SDK root.
 if(NOT OPTIX_ROOT)
@@ -105,6 +113,7 @@ target_compile_definitions(optix_wrapper PRIVATE
         NOMINMAX
         OPTIX_MAX_REG_COUNT=${OPTIX_MAX_REG_COUNT}
         OPTIX_STACK_SIZE_SCALE=${OPTIX_STACK_SIZE_SCALE}
+        HAVE_OPENPGL
 )
 
 # Pass the PTX files as *string literal* macros usable at runtime.
@@ -116,19 +125,19 @@ set_target_properties(optix_wrapper PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 
-find_path(OPENPGL_INCLUDE_DIR openpgl/version.h PATHS ENV OPENPGL_ROOT PATH_SUFFIXES include)
-find_library(OPENPGL_LIBRARY NAMES openpgl PATHS ENV OPENPGL_ROOT PATH_SUFFIXES lib)
-if(OPENPGL_INCLUDE_DIR AND OPENPGL_LIBRARY)
-  target_include_directories(optix_wrapper PRIVATE ${OPENPGL_INCLUDE_DIR})
-  target_link_libraries(optix_wrapper PRIVATE ${OPENPGL_LIBRARY})
-  target_compile_definitions(optix_wrapper PRIVATE HAVE_OPENPGL)
-endif()
-
 target_link_libraries(optix_wrapper
         PRIVATE
         optix_stubs
         CUDA::cuda_driver
 )
+
+if(TARGET OpenPGL::OpenPGL)
+    target_link_libraries(optix_wrapper PRIVATE OpenPGL::OpenPGL)
+elseif(TARGET OpenPGL::openpgl)
+    target_link_libraries(optix_wrapper PRIVATE OpenPGL::openpgl)
+elseif(TARGET openpgl)
+    target_link_libraries(optix_wrapper PRIVATE openpgl)
+endif()
 
 install(TARGETS optix_wrapper
         RUNTIME DESTINATION bin
