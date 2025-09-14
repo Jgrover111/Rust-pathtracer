@@ -13,6 +13,13 @@ struct GuideGPU {
   CUdeviceptr d_grid;    int3 grid_res; float3 grid_min,grid_max,cell_size;
 };
 
+struct TrainSample {
+  float3 position;
+  float3 dir_in;
+  float3 contrib;
+  uint32_t is_delta;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif

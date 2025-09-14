@@ -13,6 +13,17 @@ struct GuideGPU {
   CUdeviceptr d_grid;    int3 grid_res; float3 grid_min,grid_max,cell_size;
 };
 
+struct TrainSample {
+  float3 position;
+  float3 dir_in;
+  float3 contrib;
+  uint32_t is_delta;
+};
+
+extern __device__ TrainSample* g_train_samples;
+extern __device__ uint32_t*    g_train_write_idx;
+extern __device__ uint32_t     g_train_sample_capacity;
+
 __device__ __forceinline__ int guiding_region_id(const GuideGPU& G,const float3& P){
   float3 rel=make_float3((P.x-G.grid_min.x)/G.cell_size.x,
                          (P.y-G.grid_min.y)/G.cell_size.y,
