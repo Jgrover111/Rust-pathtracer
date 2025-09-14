@@ -1268,6 +1268,32 @@ void guiding_set_train_buffer_size(uint32_t n){
 }
 
 extern "C" __declspec(dllexport)
+void guiding_map_train_samples(const TrainSample** samples, uint32_t* count){
+  static std::vector<TrainSample> host;
+  if (samples) *samples = nullptr;
+  if (count) *count = 0;
+  if (!g_handle) return;
+  auto& st = *reinterpret_cast<State*>(g_handle);
+  if (!st.d_train_samples || !st.d_train_write_idx || st.train_sample_capacity == 0) return;
+
+  host.resize(st.train_sample_capacity);
+  CU_CHECK(cuMemcpyDtoH(host.data(), st.d_train_samples,
+                        sizeof(TrainSample) * size_t(st.train_sample_capacity)));
+  uint32_t n = 0;
+  CU_CHECK(cuMemcpyDtoH(&n, st.d_train_write_idx, sizeof(uint32_t)));
+  if (samples) *samples = host.data();
+  if (count) *count = n;
+}
+
+extern "C" __declspec(dllexport)
+void guiding_reset_train_write_idx(){
+  if (!g_handle) return;
+  auto& st = *reinterpret_cast<State*>(g_handle);
+  if (st.d_train_write_idx)
+    CU_CHECK(cuMemsetD32(st.d_train_write_idx, 0, 1));
+}
+
+extern "C" __declspec(dllexport)
 void guiding_set_grid_res(int x,int y,int z){
   g_guiding_gpu.grid_res = make_int3(x,y,z);
 }
