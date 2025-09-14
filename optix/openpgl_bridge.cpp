@@ -1,27 +1,79 @@
 #include "openpgl_bridge.h"
+
+#include <algorithm>
 #include <vector>
-struct DummyStorage {
-  std::vector<int> dummy;
+
+#include <openpgl/cpp/Device.h>
+#include <openpgl/cpp/Field.h>
+#include <openpgl/cpp/FieldConfig.h>
+#include <openpgl/cpp/SampleData.h>
+#include <openpgl/cpp/SampleStorage.h>
+
+using namespace openpgl::cpp;
+
+struct SampleStorageRGB {
+    SampleStorage storage;
+    std::vector<pgl_vec3f> colors;
 };
 
-pgl_dev_t pgl_dev_create(int){return nullptr;}
-void pgl_dev_destroy(pgl_dev_t){}
-
-pgl_field_t pgl_field_create(pgl_dev_t,const float[3],const float[3]){return nullptr;}
-void pgl_field_destroy(pgl_field_t){}
-
-pgl_samples_t pgl_samples_create(){return new DummyStorage;}
-void pgl_samples_destroy(pgl_samples_t s){delete static_cast<DummyStorage*>(s);}
-
-void pgl_samples_add_surface(pgl_samples_t,const float[3],const float[3],const float[3],int){}
-
-void pgl_field_update(pgl_field_t,pgl_samples_t){}
-
-void pgl_field_snapshot(pgl_field_t,const pgl_region** regions,uint32_t* region_count,const pgl_lobe** lobes,uint32_t* lobe_count){
-  static pgl_region empty_region{};
-  static pgl_lobe   empty_lobe{};
-  if(regions) *regions=&empty_region;
-  if(region_count) *region_count=0;
-  if(lobes) *lobes=&empty_lobe;
-  if(lobe_count) *lobe_count=0;
+pgl_dev_t pgl_dev_create(int num_threads) {
+    return new Device(PGL_DEVICE_TYPE_CPU_4, static_cast<size_t>(num_threads));
 }
+
+void pgl_dev_destroy(pgl_dev_t dev) { delete static_cast<Device *>(dev); }
+
+pgl_field_t pgl_field_create(pgl_dev_t dev, const float world_min[3], const float world_max[3]) {
+    Device *device = static_cast<Device *>(dev);
+    FieldConfig cfg;
+    cfg.Init(PGL_SPATIAL_STRUCTURE_KDTREE, PGL_DIRECTIONAL_DISTRIBUTION_VMM, true);
+    Field *field = new Field(device, cfg);
+    pgl_box3f bounds;
+    pglBox3f(bounds, world_min[0], world_min[1], world_min[2], world_max[0], world_max[1], world_max[2]);
+    field->SetSceneBounds(bounds);
+    return field;
+}
+
+void pgl_field_destroy(pgl_field_t field) { delete static_cast<Field *>(field); }
+
+pgl_samples_t pgl_samples_create() { return new SampleStorageRGB; }
+
+void pgl_samples_destroy(pgl_samples_t s) { delete static_cast<SampleStorageRGB *>(s); }
+
+void pgl_samples_add_surface(pgl_samples_t handle, const float pos[3], const float dir_in[3], const float weight_rgb[3], int is_delta) {
+    auto *s = static_cast<SampleStorageRGB *>(handle);
+    SampleData sample{};
+    pglPoint3f(sample.position, pos[0], pos[1], pos[2]);
+    sample.direction = {dir_in[0], dir_in[1], dir_in[2]};
+    sample.weight = (weight_rgb[0] + weight_rgb[1] + weight_rgb[2]) / 3.0f;
+    sample.pdf = 1.0f;
+    sample.distance = 0.0f;
+    sample.flags = is_delta ? PGLSampleData::EDirectLight : 0u;
+    s->storage.AddSample(sample);
+    s->colors.push_back({weight_rgb[0], weight_rgb[1], weight_rgb[2]});
+}
+
+void pgl_field_update(pgl_field_t field_handle, pgl_samples_t samples_handle) {
+    auto *field = static_cast<Field *>(field_handle);
+    auto *samples = static_cast<SampleStorageRGB *>(samples_handle);
+    field->Update(samples->storage);
+    samples->storage.ClearSurface();
+    samples->colors.clear();
+}
+
+void pgl_field_snapshot(pgl_field_t, const pgl_region **regions, uint32_t *region_count, const pgl_lobe **lobes, uint32_t *lobe_count) {
+    static std::vector<pgl_region> reg_vec;
+    static std::vector<pgl_lobe> lobe_vec;
+
+    reg_vec.clear();
+    lobe_vec.clear();
+
+    if (regions)
+        *regions = reg_vec.data();
+    if (region_count)
+        *region_count = static_cast<uint32_t>(reg_vec.size());
+    if (lobes)
+        *lobes = lobe_vec.data();
+    if (lobe_count)
+        *lobe_count = static_cast<uint32_t>(lobe_vec.size());
+}
+
