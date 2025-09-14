@@ -5,10 +5,7 @@
 #include <cuda_runtime.h>
 #include <vector_types.h>
 #include <math_constants.h>
-
-#define GUIDE_PHI_RES 16
-#define GUIDE_THETA_RES 8
-#define GUIDE_BIN_COUNT (GUIDE_PHI_RES * GUIDE_THETA_RES)
+#include "guiding_gpu.cuh"
 
 // Precomputed constants to avoid repeated division at runtime
 #define INV_UINT16       (1.0f / 65536.0f)
@@ -262,25 +259,10 @@ static __forceinline__ __device__ float luminance(const float3& c)
     return c.x * 0.2126f + c.y * 0.7152f + c.z * 0.0722f;
 }
 
-static __forceinline__ __device__ int guiding_bin(const float3& dir, const float3& Ng)
+static __forceinline__ __device__ float3 sample_guided_dir(PRD& prd, const float3& P, const float3& Ng, float& pdf, float& cosTheta)
 {
-    float3 tangent, bitangent;
-    make_onb(Ng, tangent, bitangent);
-    float3 local = make_float3(dot(dir, tangent), dot(dir, bitangent), dot(dir, Ng));
-    if (local.z <= 0.f) return -1;
-    float phi = atan2f(local.y, local.x);
-    if (phi < 0.f) phi += 2.f * CUDART_PI_F;
-    int phi_idx = min(max(int(phi / (2.f * CUDART_PI_F) * GUIDE_PHI_RES), 0), GUIDE_PHI_RES - 1);
-    int mu_idx = min(max(int(local.z * GUIDE_THETA_RES), 0), GUIDE_THETA_RES - 1);
-    return mu_idx * GUIDE_PHI_RES + phi_idx;
-}
-
-static __forceinline__ __device__ float3 sample_guided_dir(PRD& prd, const float3& Ng, float& pdf, float& cosTheta)
-{
-    float* table = reinterpret_cast<float*>(params.d_guiding);
-    float sum = 0.f;
-    for (int i = 0; i < GUIDE_BIN_COUNT; ++i) sum += table[i];
-    if (sum <= 0.f) {
+    const GuideGPU* G = reinterpret_cast<const GuideGPU*>(params.d_guiding);
+    if (!G || G->d_regions == 0 || G->d_lobes == 0 || G->d_grid == 0) {
         float r1 = next_rand(prd);
         float r2 = next_rand(prd);
         const float phi = 2.0f * CUDART_PI_F * r1;
@@ -293,60 +275,73 @@ static __forceinline__ __device__ float3 sample_guided_dir(PRD& prd, const float
         pdf = cosTheta * (1.0f / CUDART_PI_F);
         return newDir;
     }
-    float r = next_rand(prd) * sum;
-    float acc = 0.f;
-    int idx = GUIDE_BIN_COUNT - 1;
-    for (int i = 0; i < GUIDE_BIN_COUNT; ++i) {
-        acc += table[i];
-        if (r <= acc) { idx = i; break; }
+    int region_id = guiding_region_id(*G, P);
+    if (region_id < 0) {
+        float r1 = next_rand(prd);
+        float r2 = next_rand(prd);
+        const float phi = 2.0f * CUDART_PI_F * r1;
+        cosTheta = sqrtf(1.0f - r2);
+        const float sinTheta = sqrtf(r2);
+        float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+        float3 t, b;
+        make_onb(Ng, t, b);
+        float3 newDir = normalize(localDir.x * t + localDir.y * b + localDir.z * Ng);
+        pdf = cosTheta * (1.0f / CUDART_PI_F);
+        return newDir;
     }
-    int phi_idx = idx % GUIDE_PHI_RES;
-    int mu_idx  = idx / GUIDE_PHI_RES;
-    float phi = (phi_idx + next_rand(prd)) / float(GUIDE_PHI_RES) * 2.f * CUDART_PI_F;
-    float mu  = (mu_idx + next_rand(prd)) / float(GUIDE_THETA_RES);
-    cosTheta = mu;
-    float sinTheta = sqrtf(fmaxf(0.f, 1.f - cosTheta * cosTheta));
-    float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
-    float3 t, b;
-    make_onb(Ng, t, b);
-    float3 newDir = normalize(localDir.x * t + localDir.y * b + localDir.z * Ng);
-    float bin_mass = table[idx] / sum;
-    float bin_area = (2.f * CUDART_PI_F / GUIDE_PHI_RES) * (1.f / GUIDE_THETA_RES);
-    pdf = bin_mass / bin_area;
-    return newDir;
+    const GuideRegion* regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
+    const GuideRegion& R = regions[region_id];
+    const GuideLobe* lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
+    int lobe_idx = guiding_choose_lobe(R, lobes, next_rand(prd));
+    if (lobe_idx < 0) {
+        float r1 = next_rand(prd);
+        float r2 = next_rand(prd);
+        const float phi = 2.0f * CUDART_PI_F * r1;
+        cosTheta = sqrtf(1.0f - r2);
+        const float sinTheta = sqrtf(r2);
+        float3 localDir = make_float3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
+        float3 t, b;
+        make_onb(Ng, t, b);
+        float3 newDir = normalize(localDir.x * t + localDir.y * b + localDir.z * Ng);
+        pdf = cosTheta * (1.0f / CUDART_PI_F);
+        return newDir;
+    }
+    float2 u = make_float2(next_rand(prd), next_rand(prd));
+    float3 dir = guiding_sample_lobe(lobes[lobe_idx], u);
+    cosTheta = fmaxf(dot(dir, Ng), 0.f);
+    pdf = guiding_mixture_pdf(R, lobes, dir);
+    return dir;
 }
 
-static __forceinline__ __device__ float guiding_pdf(const float3& dir, const float3& Ng)
+static __forceinline__ __device__ float guiding_pdf(const float3& P, const float3& wi)
 {
     if (params.d_guiding == 0) return 0.f;
-    int idx = guiding_bin(dir, Ng);
-    if (idx < 0) return 0.f;
-    float* table = reinterpret_cast<float*>(params.d_guiding);
-    float sum = 0.f;
-    for (int i = 0; i < GUIDE_BIN_COUNT; ++i) sum += table[i];
-    if (sum <= 0.f) return 0.f;
-    float bin_mass = table[idx] / sum;
-    float bin_area = (2.f * CUDART_PI_F / GUIDE_PHI_RES) * (1.f / GUIDE_THETA_RES);
-    return bin_mass / bin_area;
+    const GuideGPU* G = reinterpret_cast<const GuideGPU*>(params.d_guiding);
+    if (!G || G->d_regions == 0 || G->d_lobes == 0 || G->d_grid == 0) return 0.f;
+    int region_id = guiding_region_id(*G, P);
+    if (region_id < 0) return 0.f;
+    const GuideRegion* regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
+    const GuideRegion& R = regions[region_id];
+    const GuideLobe* lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
+    return guiding_mixture_pdf(R, lobes, wi);
 }
 
-static __forceinline__ __device__ float guiding_strength()
+static __forceinline__ __device__ float guiding_strength(const float3& P)
 {
     if (params.d_guiding == 0) return 0.f;
-    float* table = reinterpret_cast<float*>(params.d_guiding);
+    const GuideGPU* G = reinterpret_cast<const GuideGPU*>(params.d_guiding);
+    if (!G || G->d_regions == 0 || G->d_lobes == 0 || G->d_grid == 0) return 0.f;
+    int region_id = guiding_region_id(*G, P);
+    if (region_id < 0) return 0.f;
+    const GuideRegion* regions = reinterpret_cast<const GuideRegion*>(G->d_regions);
+    const GuideRegion& R = regions[region_id];
+    const GuideLobe* lobes = reinterpret_cast<const GuideLobe*>(G->d_lobes) + R.lobe_ofs;
     float sum = 0.f;
-    for (int i = 0; i < GUIDE_BIN_COUNT; ++i) sum += table[i];
-    return sum / (sum + float(GUIDE_BIN_COUNT));
+    for (uint32_t i = 0; i < R.lobe_num; ++i) sum += lobes[i].weight;
+    return sum / (sum + 1.f);
 }
 
-static __forceinline__ __device__ void update_guiding(const float3& dir, const float3& Ng, float weight)
-{
-    if (params.d_guiding == 0) return;
-    int idx = guiding_bin(dir, Ng);
-    if (idx < 0) return;
-    float* table = reinterpret_cast<float*>(params.d_guiding);
-    atomicAdd(&table[idx], weight);
-}
+static __forceinline__ __device__ void update_guiding(const float3&, const float3&, float) {}
 
 static __forceinline__ __device__ float3 reflect(const float3& i, const float3& n)
 {
@@ -669,10 +664,10 @@ extern "C" __global__ void __closesthit__ch()
         float3 newDir;
         float cosTheta;
         float pdf_guided = 0.f;
-        float guideWeight = guiding_strength();
+        float guideWeight = guiding_strength(P);
         bool guided = (guideWeight > 0.f) && (next_rand(prd) < guideWeight);
         if (guided) {
-            newDir = sample_guided_dir(prd, Ng, pdf_guided, cosTheta);
+            newDir = sample_guided_dir(prd, P, Ng, pdf_guided, cosTheta);
         } else {
             float r1 = next_rand(prd);
             float r2 = next_rand(prd);
@@ -683,7 +678,7 @@ extern "C" __global__ void __closesthit__ch()
             float3 tangent, bitangent;
             make_onb(Ng, tangent, bitangent);
             newDir = normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * Ng);
-            pdf_guided = guiding_pdf(newDir, Ng);
+            pdf_guided = guiding_pdf(P, newDir);
         }
 
         prd.origin = P + Ng * 1e-3f;
